@@ -24,11 +24,11 @@ DEFAULT_TOP_P          = 1.0
 DEFAULT_REPEAT_PENALTY = 1.0
 DEFAULT_SEED           = 42
 DEFAULT_MAX_TOOL_CALLS = 7
-DEFAULT_MAX_TOOL_CONTENT = 6000   # chars — truncation limit sent back to the model
+DEFAULT_MAX_TOOL_CONTENT = 2000   # chars — truncation limit sent back to the model
 
 # ==================== UI DEFAULTS ==================== #
 DEFAULT_PREVIEW_ROWS   = 50
-DEFAULT_WIKIPEDIA_LIMIT = 5000
+DEFAULT_WIKIPEDIA_LIMIT = 2000
 
 # ==================== TAXONOMY COLUMNS ==================== #
 # Expected column names in df_taxo — update here if the CSV schema changes

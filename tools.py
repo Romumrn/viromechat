@@ -20,77 +20,111 @@ TOOL_LABELS = {
 
 def wikipedia_search(search_term: str, wikipedia_limit: int) -> dict:
     term = re.sub(r"[^\w\s\-]", "", search_term.strip())
-    title = requests.utils.quote(term)
-    
-    # 1. Tentative de récupération de la page exacte
-    api_url = (
-        "https://en.wikipedia.org/w/api.php "
-        "?action=query&format=json&prop=extracts&explaintext=1"
-        f"&titles={title}"
-    )
-    r = requests.get(api_url, headers={"User-Agent": "VirusAgent/1.0"})
-    
-    if r.status_code == 200:
-        pages = r.json().get("query", {}).get("pages", {})
-        page = next(iter(pages.values()))
-        
-        if "missing" not in page:
-            page_title = page.get("title", term)
-            extract = page.get("extract", "")
-            url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
-            if len(extract) > wikipedia_limit:
-                extract = extract[:wikipedia_limit] + "... [truncated]"
-            return {"success": True, "title": page_title, "extract": extract, "url": url}
-    
-    # 2. Fallback : recherche de pages proches via opensearch ou search
-    search_url = (
-        "https://en.wikipedia.org/w/api.php "
-        "?action=query&format=json&list=search"
-        f"&srsearch={title}&srlimit=1&srprop=snippet"
-    )
-    sr = requests.get(search_url, headers={"User-Agent": "VirusAgent/1.0"})
-    
-    if sr.status_code != 200:
-        return {"success": False, "message": f"No Wikipedia article found for {search_term}"}
-    
-    search_results = sr.json().get("query", {}).get("search", [])
-    if not search_results:
-        return {"success": False, "message": f"No Wikipedia article found for {search_term}"}
-    
-    # 3. Récupération du contenu de la page la plus proche
-    best_match_title = search_results[0]["title"]
-    best_match_title_encoded = requests.utils.quote(best_match_title)
-    
-    page_url = (
-        "https://en.wikipedia.org/w/api.php "
-        "?action=query&format=json&prop=extracts&explaintext=1"
-        f"&titles={best_match_title_encoded}"
-    )
-    pr = requests.get(page_url, headers={"User-Agent": "VirusAgent/1.0"})
-    
-    if pr.status_code != 200:
-        return {"success": False, "message": f"No Wikipedia article found for {search_term}"}
-    
-    pages = pr.json().get("query", {}).get("pages", {})
-    page = next(iter(pages.values()))
-    
-    if "missing" in page:
-        return {"success": False, "message": f"No Wikipedia article found for {search_term}"}
-    
-    page_title = page.get("title", best_match_title)
-    extract = page.get("extract", "")
-    url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
-    if len(extract) > wikipedia_limit:
-        extract = extract[:wikipedia_limit] + "... [truncated]"
-    
-    return {
-        "success": True,
-        "title": page_title,
-        "extract": extract,
-        "url": url,
-        "fuzzy_match": True,           # indique que c'est une page approchée
-        "original_search": search_term  # terme original pour traçabilité
+
+    api_url = "https://en.wikipedia.org/w/api.php"
+    headers = {"User-Agent": "VirusAgent/1.0"}
+
+    # 1️⃣ Tentative exacte avec redirections
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "extracts",
+        "explaintext": 1,
+        "redirects": 1,   # ← crucial
+        "titles": term
     }
+
+    try:
+        r = requests.get(api_url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        pages = data.get("query", {}).get("pages", {})
+        if pages:
+            page = next(iter(pages.values()))
+            if "missing" not in page:
+                page_title = page.get("title", term)
+                extract = page.get("extract", "")
+                url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
+
+                if len(extract) > wikipedia_limit:
+                    extract = extract[:wikipedia_limit] + "... [truncated]"
+
+                return {
+                    "success": True,
+                    "title": page_title,
+                    "extract": extract,
+                    "url": url,
+                    "fuzzy_match": False
+                }
+
+    except requests.RequestException:
+        pass  # on laisse le fallback gérer
+
+    # 2️⃣ Fallback : recherche textuelle
+    search_params = {
+        "action": "query",
+        "format": "json",
+        "list": "search",
+        "srsearch": term,
+        "srlimit": 1
+    }
+
+    try:
+        sr = requests.get(api_url, params=search_params, headers=headers, timeout=10)
+        sr.raise_for_status()
+        search_results = sr.json().get("query", {}).get("search", [])
+
+        if not search_results:
+            return {
+                "success": False,
+                "message": f"No Wikipedia article found for {search_term}"
+            }
+
+        best_match_title = search_results[0]["title"]
+
+        # 3️⃣ Récupération du meilleur match
+        page_params = {
+            "action": "query",
+            "format": "json",
+            "prop": "extracts",
+            "explaintext": 1,
+            "redirects": 1,
+            "titles": best_match_title
+        }
+
+        pr = requests.get(api_url, params=page_params, headers=headers, timeout=10)
+        pr.raise_for_status()
+        pages = pr.json().get("query", {}).get("pages", {})
+        page = next(iter(pages.values()))
+
+        if "missing" in page:
+            return {
+                "success": False,
+                "message": f"No Wikipedia article found for {search_term}"
+            }
+
+        page_title = page.get("title", best_match_title)
+        extract = page.get("extract", "")
+        url = f"https://en.wikipedia.org/wiki/{page_title.replace(' ', '_')}"
+
+        if len(extract) > wikipedia_limit:
+            extract = extract[:wikipedia_limit] + "... [truncated]"
+
+        return {
+            "success": True,
+            "title": page_title,
+            "extract": extract,
+            "url": url,
+            "fuzzy_match": True,
+            "original_search": search_term
+        }
+
+    except requests.RequestException:
+        return {
+            "success": False,
+            "message": f"Wikipedia request failed for {search_term}"
+        }
 
 
 def pubmed_search(query: str, max_results: int = 3) -> dict:

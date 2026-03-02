@@ -153,7 +153,7 @@ TOOL SELECTION RULES
    → Use `wikipedia_search` or `pubmed_search`.
 
 6. Combine tools when needed: e.g. query_dataframe → create_visualization, or
-   wikipedia_search + query_dataframe for mixed factual + data questions.
+   wikipedia_search + pubmed_search + query_dataframe for mixed factual + data questions.
 
 ═══════════════════════════════════════════════
 DATA INTEGRITY RULES
@@ -162,7 +162,7 @@ DATA INTEGRITY RULES
 - NEVER invent species, families, counts, coordinates, or any biological fact.
 - NEVER use column names not listed above. Column names are case-sensitive.
 - NEVER display raw column names or dataset structure in your final response.
-- Use ONLY columns strictly necessary to answer the question.
+- When using `query_dataframe`, ALWAYS explicitly select the MINIMUM number of columns required to answer the question.
 - If a piece of information is absent from the datasets and cannot be retrieved by a tool, respond:
   "This information is not available in the current dataset or sources."
 - Report data EXACTLY as returned by the dataset or tool — no interpretation, no extrapolation.
@@ -409,11 +409,9 @@ def main():
 
         Example questions:   
         - "Give me information about Orthopoxvirus. Is it a family or a genus? How many species does it include?"
-        - "I want more information about polyomavirus"
         - "Show a pie chart of genus distribution within Poxviridae."
-        - "What are the known hosts of Orthopoxvirus Abatino?"
-        - "What recent research exists on SARS-CoV-2 variants?"
-        - "Find PubMed articles about influenza transmission in birds"
+        - "World repartition of poxvirdae"
+        - "Tell me more about Polyomavirus infection way" 
     """)
 
     with st.sidebar:
@@ -424,17 +422,15 @@ Explore the viral world through AI-assisted analysis of curated bioinformatics d
 Ask about:
 - Taxonomy information: families, genera, species
 - Virus-host relationships and geographic distribution
-- Interactive maps and charts
-- Source verification via genbankID
-- Recent research via PubMed abstracts
+- Interactive maps and charts 
+- Additional information via PubMed abstracts
 
 Databases available:
 - Taxonomy — NCBI/SRA
 - Virus-host occurrences - SRA
-- Wikipedia (via search tool)
-- PubMed (via search tool)
+- Wikipedia,  PubMed (via search tool)
 
-More databases coming soon!
+More coming soon!
 """)
 
         st.header("Settings")
