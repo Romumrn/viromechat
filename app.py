@@ -5,15 +5,14 @@ import requests
 import os
 import logging
 from datetime import datetime 
-from tools import wikipedia_search, query_dataframe, create_visualization, create_map, TOOLS_SPEC
+from tools import wikipedia_search, pubmed_search, TOOL_LABELS, query_dataframe, create_visualization, create_map, TOOLS_SPEC
 from config import (
     TAXO_DB_PATH, HOST_DB_PATH, LOG_DIR,
     OLLAMA_BASE_URL, OLLAMA_TIMEOUT, OLLAMA_DEFAULT_MODEL_PREFIX,
     PAGE_ICON, GITHUB_URL,
     DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_REPEAT_PENALTY, DEFAULT_SEED,
     DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CONTENT,
-    DEFAULT_PREVIEW_ROWS, DEFAULT_WIKIPEDIA_LIMIT,
-    TOOL_LABELS,
+    DEFAULT_PREVIEW_ROWS, DEFAULT_WIKIPEDIA_LIMIT
 )
 
 
@@ -51,7 +50,7 @@ def check_password():
     if st.session_state.get("authenticated"):
         return
 
-    st.title("🔐 Access Required")
+    st.title("Access Required")
     pwd = st.text_input("Enter access code", type="password")
     if st.button("Login"):
         if pwd == st.secrets.get("ACCESS_CODE", ""):
@@ -72,15 +71,11 @@ def load_dataframe(path):
         return None
     return pd.read_csv(path)
 
-
-# TOOL_LABELS imported from config.py
-
-
 # ==================== SOURCES DISPLAY ==================== #
 
-def render_sources(wikipedia_urls, executed_codes):
+def render_sources(wikipedia_urls, pubmed_urls, executed_codes):
     """Factorised sources expander — used both in chat history and new responses."""
-    if not wikipedia_urls and not executed_codes:
+    if not wikipedia_urls and not pubmed_urls and not executed_codes:
         return
     with st.expander("📚 Sources"):
         if wikipedia_urls:
@@ -88,6 +83,12 @@ def render_sources(wikipedia_urls, executed_codes):
             for url in wikipedia_urls:
                 title = url.split('/')[-1].replace('_', ' ')
                 st.markdown(f"- [{title}]({url})")
+        if pubmed_urls:
+            st.markdown("**🔬 PubMed**")
+            for url in pubmed_urls:
+                # Extraire le PMID de l'URL pour l'affichage
+                pmid = url.split('/')[-2] if url.endswith('/') else url.split('/')[-1]
+                st.markdown(f"- [PMID: {pmid}]({url})")
         if executed_codes:
             st.markdown("**📊 Dataset Query & Visualization**")
             full_code = "\n\n---\n\n".join(
@@ -131,11 +132,11 @@ AVAILABLE DATA
 
 `df_host` — Virus-host occurrence database (SRA)
   Columns: {df_host_columns_str}
-  Note: 'LOCALISATION_RESOLUTION' = 'local' means precise GPS coordinates;
-        'global' means approximate centroid. Always prefer 'local' for maps.
+
+You can link both dataframe with "TAX_ID" 
 
 ═══════════════════════════════════════════════
-TOOL SELECTION RULES  (follow strictly, in order)
+TOOL SELECTION RULES 
 ═══════════════════════════════════════════════
 
 1. Geographic / spatial question ("where", "map", "distribution", "location", "detected in")
@@ -149,9 +150,9 @@ TOOL SELECTION RULES  (follow strictly, in order)
    → Use `query_dataframe`.
 
 4. Biological / taxonomic background knowledge not in the datasets
-   → Use `wikipedia_search`.
+   → Use `wikipedia_search` or `pubmed_search`.
 
-5. Combine tools when needed: e.g. query_dataframe → create_visualization, or
+6. Combine tools when needed: e.g. query_dataframe → create_visualization, or
    wikipedia_search + query_dataframe for mixed factual + data questions.
 
 ═══════════════════════════════════════════════
@@ -177,13 +178,14 @@ RESPONSE STYLE
 - No speculation. No storytelling. No unsolicited context.
 - Answer ONLY what was asked. Do not expand to related topics.
 - Do not discuss drugs, treatments, cancer, or any non-virology medical topic.
-- NEVER include image tags, HTML, Markdown image syntax (![...](...)), or any reference to figure attachments in your response. Figures and charts are rendered automatically — just describe findings in text.
+- NEVER include image tags, HTML, Markdown image syntax (![...](...)), or any reference to figure attachments in your response.
+- When citing PubMed articles, include the PMID and a brief summary of key findings.
 """
         },
         {"role": "user", "content": user_query}
     ]
 
-    used_sources, used_wikipedia_urls, executed_codes, generated_figures = set(), [], [], []
+    used_sources, used_wikipedia_urls, used_pubmed_urls, executed_codes, generated_figures = set(), [], [], [], []
     tool_call_count = 0
 
     def _sw(icon, label, ok=None):
@@ -208,8 +210,7 @@ RESPONSE STYLE
 
     _sw("🧠", "Thinking")
 
-    while True:
-        # ── FIX: Timeout + explicit error handling on Ollama call ──
+    while True: 
         try:
             r = requests.post(
                 f"{OLLAMA_BASE_URL}/api/chat",
@@ -226,14 +227,14 @@ RESPONSE STYLE
         except requests.exceptions.Timeout:
             logger.error("OLLAMA_TIMEOUT | Model did not respond within 120s")
             return (
-                "⏱️ The model took too long to respond (>120s). Please try again or select a faster model.",
-                generated_figures, used_sources, used_wikipedia_urls, executed_codes
+                "The model took too long to respond (>120s). Please try again or select a faster model.",
+                generated_figures, used_sources, used_wikipedia_urls, used_pubmed_urls, executed_codes
             )
         except requests.exceptions.RequestException as e:
             logger.error(f"OLLAMA_ERROR | {e}")
             return (
-                f"❌ Could not reach Ollama: {e}",
-                generated_figures, used_sources, used_wikipedia_urls, executed_codes
+                f"Could not reach Ollama: {e}",
+                generated_figures, used_sources, used_wikipedia_urls, used_pubmed_urls, executed_codes
             )
 
         msg = r.json()["message"]
@@ -245,7 +246,7 @@ RESPONSE STYLE
         if "tool_calls" not in msg:
             messages.append(msg)
             logger.info(f"RESULT | {msg['content'][:500]}{'...' if len(msg['content']) > 500 else ''}")
-            return msg["content"], generated_figures, used_sources, used_wikipedia_urls, executed_codes
+            return msg["content"], generated_figures, used_sources, used_wikipedia_urls, used_pubmed_urls, executed_codes
 
         messages.append({"role": "assistant", "content": "", "tool_calls": msg["tool_calls"]})
 
@@ -280,6 +281,36 @@ RESPONSE STYLE
                 else:
                     content = output["message"]
                     logger.warning(f"TOOL_FAIL | wikipedia_search | {output['message']}")
+                    _sw(icon, label, ok=False)
+
+            elif name == "pubmed_search":
+                output = pubmed_search(**args)
+                if output["success"]:
+                    used_sources.add("PubMed")
+                    articles = output["articles"]
+                    content_parts = [f"Found {output['count']} relevant articles on PubMed:\n"]
+                    
+                    for i, article in enumerate(articles, 1):
+                        used_pubmed_urls.append(article["url"])
+                        authors_str = ", ".join(article["authors"]) if article["authors"] else "Unknown authors"
+                        doi_str = f"DOI: {article['doi']}" if article["doi"] else ""
+                        
+                        content_parts.append(
+                            f"\n--- Article {i} ---\n"
+                            f"**{article['title']}**\n"
+                            f"Authors: {authors_str} et al.\n"
+                            f"Journal: {article['journal']} ({article['year']})\n"
+                            f"PMID: {article['pmid']} {doi_str}\n\n"
+                            f"Abstract:\n{article['abstract']}\n"
+                            f"🔗 {article['url']}"
+                        )
+                    
+                    content = "\n".join(content_parts)
+                    logger.info(f"TOOL_OK | pubmed_search | found {output['count']} articles")
+                    _sw(icon, label, ok=True)
+                else:
+                    content = output["message"]
+                    logger.warning(f"TOOL_FAIL | pubmed_search | {output['message']}")
                     _sw(icon, label, ok=False)
 
             elif name == "query_dataframe":
@@ -380,7 +411,9 @@ def main():
         - "Give me information about Orthopoxvirus. Is it a family or a genus? How many species does it include?"
         - "I want more information about polyomavirus"
         - "Show a pie chart of genus distribution within Poxviridae."
-        - "What are the known hosts of Orthopoxvirus Abatino?" 
+        - "What are the known hosts of Orthopoxvirus Abatino?"
+        - "What recent research exists on SARS-CoV-2 variants?"
+        - "Find PubMed articles about influenza transmission in birds"
     """)
 
     with st.sidebar:
@@ -393,18 +426,19 @@ Ask about:
 - Virus-host relationships and geographic distribution
 - Interactive maps and charts
 - Source verification via genbankID
+- Recent research via PubMed abstracts
 
 Databases available:
 - Taxonomy — NCBI/SRA
 - Virus-host occurrences - SRA
 - Wikipedia (via search tool)
+- PubMed (via search tool)
 
 More databases coming soon!
 """)
 
         st.header("Settings")
 
-        # ── FIX: Single /api/tags call, reused for both health check and model list ──
         try:
             ollama_response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=OLLAMA_TIMEOUT)
             if ollama_response.status_code != 200:
@@ -466,7 +500,11 @@ More databases coming soon!
                 )
 
             # ── FIX: Factorised sources rendering ──
-            render_sources(msg.get("wikipedia_urls", []), msg.get("executed_codes", []))
+            render_sources(
+                msg.get("wikipedia_urls", []), 
+                msg.get("pubmed_urls", []), 
+                msg.get("executed_codes", [])
+            )
 
     # ── Chat input ──
     if query := st.chat_input("Ask about viruses..."):
@@ -479,7 +517,7 @@ More databases coming soon!
             status_placeholder = st.empty()
             status_container = status_placeholder.status("Processing...", expanded=True)
 
-            answer, figures, used_sources, wikipedia_urls, executed_codes = ollama_agent_loop(
+            answer, figures, used_sources, wikipedia_urls, pubmed_urls, executed_codes = ollama_agent_loop(
                 model=model,
                 user_query=query,
                 df_taxo=df_taxo,
@@ -499,7 +537,6 @@ More databases coming soon!
 
             st.markdown(answer)
 
-            # ── FIX: Stable figure keys for new responses ──
             new_msg_idx = len(st.session_state.messages)  # index of the soon-to-be-appended message
             for fig_idx, fig in enumerate(figures):
                 st.plotly_chart(
@@ -507,15 +544,15 @@ More databases coming soon!
                     key=f"fig_{new_msg_idx}_{fig_idx}",
                     config={'displayModeBar': True, 'scrollZoom': True}
                 )
-
-            # ── FIX: Factorised sources rendering ──
-            render_sources(wikipedia_urls, executed_codes)
+                
+            render_sources(wikipedia_urls, pubmed_urls, executed_codes)
 
         st.session_state.messages.append({
             "role": "assistant",
             "content": answer,
             "figures": figures,
             "wikipedia_urls": wikipedia_urls,
+            "pubmed_urls": pubmed_urls,
             "executed_codes": executed_codes,
         })
 

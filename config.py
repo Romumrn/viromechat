@@ -30,14 +30,6 @@ DEFAULT_MAX_TOOL_CONTENT = 6000   # chars — truncation limit sent back to the 
 DEFAULT_PREVIEW_ROWS   = 50
 DEFAULT_WIKIPEDIA_LIMIT = 5000
 
-# ==================== TOOL LABELS ==================== #
-TOOL_LABELS = {
-    "wikipedia_search":     ("📖", "Wikipedia search"),
-    "query_dataframe":      ("🔬", "Dataset query"),
-    "create_visualization": ("📊", "Creating chart"),
-    "create_map":           ("🗺️",  "Creating map"),
-}
-
 # ==================== TAXONOMY COLUMNS ==================== #
 # Expected column names in df_taxo — update here if the CSV schema changes
 TAXO_COL_FAMILY  = "family"
