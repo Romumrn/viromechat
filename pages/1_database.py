@@ -94,7 +94,7 @@ def main():
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Taxonomy (df_taxo)")
+        st.subheader("Taxonomy ")
         metric_row([
             ("Total entries", f"{len(df_taxo):,}"),
             ("Families",      safe_nunique(df_taxo, "FAMILY_NAME")),
@@ -103,7 +103,7 @@ def main():
         ])
 
     with col2:
-        st.subheader("Virus-Host (df_host)")
+        st.subheader("Virus-Host ")
         
         metric_row([
             ("Total entries", f"{len(df_taxo):,}"),
