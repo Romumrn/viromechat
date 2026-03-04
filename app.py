@@ -156,9 +156,30 @@ TOOL SELECTION RULES
    wikipedia_search + pubmed_search + query_dataframe for mixed factual + data questions.
 
 ═══════════════════════════════════════════════
+ACRONYM RESOLUTION & EMPTY RESULT HANDLING
+═══════════════════════════════════════════════
+
+- NEVER search with an acronym directly (HIV, HBV, JSRV, SARS, MPOX, etc.)
+  ALWAYS resolve the acronym and search with their species name of TAXID 
+  If unsure of the full name, call `wikipedia_search` first to resolve it.
+  Example: HIV -> Lentivirus humimdef1
+  EBV -> Lymphocryptovirus humangamma4
+
+- MANDATORY EMPTY RESULT GUARD:
+  After ANY `query_dataframe` or `create_map` call, check if the result is empty (0 rows).
+  If the result is empty:
+    1. Try a broader search term (e.g. genus instead of species, partial name)
+    2. Try alternate spellings or synonyms
+    3. Call `query_dataframe` with: result = df_host[df_host['VIRAL_SPECIES'].str.contains('TERM', case=False, na=False)]
+       to inspect what names are actually present before retrying the map or query.
+    4. Only report "no data found" after at least 2 retry attempts with different terms.
+    
+═══════════════════════════════════════════════
 DATA INTEGRITY RULES
 ═══════════════════════════════════════════════
 
+- NEVER assume that common virus names exist in the dataset.
+- ALWAYS verify species existence in df_taxo before querying df_host.
 - NEVER invent species, families, counts, coordinates, or any biological fact.
 - NEVER use column names not listed above. Column names are case-sensitive.
 - NEVER display raw column names or dataset structure in your final response.
@@ -256,118 +277,120 @@ RESPONSE STYLE
                 "role": "system",
                 "content": f"Tool call limit reached ({max_tool_calls}). Synthesize a final answer to: '{user_query}'"
             })
+        
+        else:
 
-        for call in msg["tool_calls"]:
-            tool_call_count += 1
-            name = call["function"]["name"]
-            args = call["function"]["arguments"]
-            logger.info(f"TOOL_CALL #{tool_call_count} | {name} | args={args}")
+            for call in msg["tool_calls"]:
+                tool_call_count += 1
+                name = call["function"]["name"]
+                args = call["function"]["arguments"]
+                logger.info(f"TOOL_CALL #{tool_call_count} | {name} | args={args}")
 
-            icon, label = TOOL_LABELS.get(name, ("🔧", name))
-            _sw(icon, label)
+                icon, label = TOOL_LABELS.get(name, ("🔧", name))
+                _sw(icon, label)
 
-            # ── Execute the tool ──
-            if name == "wikipedia_search":
-                output = wikipedia_search(**args, wikipedia_limit=wikipedia_limit)
-                if output["success"]:
-                    used_sources.add("Wikipedia")
-                    used_wikipedia_urls.append(output["url"])
-                    fuzzy_note = ""
-                    if output.get("fuzzy_match"):
-                        fuzzy_note = f"\n\n> ⚠️ No exact page found for *{output['original_search']}* — showing closest match."
-                    content = f"**{output['title']}**\n\n{output['extract']}{fuzzy_note}\n\n🔗 {output['url']}"
-                    logger.info(f"TOOL_OK | wikipedia_search | {output['url']}")
-                    _sw(icon, label, ok=True)
-                else:
-                    content = output["message"]
-                    logger.warning(f"TOOL_FAIL | wikipedia_search | {output['message']}")
-                    _sw(icon, label, ok=False)
+                # ── Execute the tool ──
+                if name == "wikipedia_search":
+                    output = wikipedia_search(**args, wikipedia_limit=wikipedia_limit)
+                    if output["success"]:
+                        used_sources.add("Wikipedia")
+                        used_wikipedia_urls.append(output["url"])
+                        fuzzy_note = ""
+                        if output.get("fuzzy_match"):
+                            fuzzy_note = f"\n\n> ⚠️ No exact page found for *{output['original_search']}* — showing closest match."
+                        content = f"**{output['title']}**\n\n{output['extract']}{fuzzy_note}\n\n🔗 {output['url']}"
+                        logger.info(f"TOOL_OK | wikipedia_search | {output['url']}")
+                        _sw(icon, label, ok=True)
+                    else:
+                        content = output["message"]
+                        logger.warning(f"TOOL_FAIL | wikipedia_search | {output['message']}")
+                        _sw(icon, label, ok=False)
 
-            elif name == "pubmed_search":
-                output = pubmed_search(**args)
-                if output["success"]:
-                    used_sources.add("PubMed")
-                    articles = output["articles"]
-                    content_parts = [f"Found {output['count']} relevant articles on PubMed:\n"]
-                    
-                    for i, article in enumerate(articles, 1):
-                        used_pubmed_urls.append(article["url"])
-                        authors_str = ", ".join(article["authors"]) if article["authors"] else "Unknown authors"
-                        doi_str = f"DOI: {article['doi']}" if article["doi"] else ""
+                elif name == "pubmed_search":
+                    output = pubmed_search(**args)
+                    if output["success"]:
+                        used_sources.add("PubMed")
+                        articles = output["articles"]
+                        content_parts = [f"Found {output['count']} relevant articles on PubMed:\n"]
                         
-                        content_parts.append(
-                            f"\n--- Article {i} ---\n"
-                            f"**{article['title']}**\n"
-                            f"Authors: {authors_str} et al.\n"
-                            f"Journal: {article['journal']} ({article['year']})\n"
-                            f"PMID: {article['pmid']} {doi_str}\n\n"
-                            f"Abstract:\n{article['abstract']}\n"
-                            f"🔗 {article['url']}"
-                        )
-                    
-                    content = "\n".join(content_parts)
-                    logger.info(f"TOOL_OK | pubmed_search | found {output['count']} articles")
-                    _sw(icon, label, ok=True)
+                        for i, article in enumerate(articles, 1):
+                            used_pubmed_urls.append(article["url"])
+                            authors_str = ", ".join(article["authors"]) if article["authors"] else "Unknown authors"
+                            doi_str = f"DOI: {article['doi']}" if article["doi"] else ""
+                            
+                            content_parts.append(
+                                f"\n--- Article {i} ---\n"
+                                f"**{article['title']}**\n"
+                                f"Authors: {authors_str} et al.\n"
+                                f"Journal: {article['journal']} ({article['year']})\n"
+                                f"PMID: {article['pmid']} {doi_str}\n\n"
+                                f"Abstract:\n{article['abstract']}\n"
+                                f"🔗 {article['url']}"
+                            )
+                        
+                        content = "\n".join(content_parts)
+                        logger.info(f"TOOL_OK | pubmed_search | found {output['count']} articles")
+                        _sw(icon, label, ok=True)
+                    else:
+                        content = output["message"]
+                        logger.warning(f"TOOL_FAIL | pubmed_search | {output['message']}")
+                        _sw(icon, label, ok=False)
+
+                elif name == "query_dataframe":
+                    output = query_dataframe(args["code"], df_taxo, df_host, preview_rows=preview_rows)
+                    if output["success"]:
+                        executed_codes.append(args["code"])
+                        used_sources.add("Dataset query")
+                        content = f"Query OK. Shape: {output['shape']}\nColumns: {', '.join(output['columns'])}\n{output['preview']}"
+                        logger.info(f"TOOL_OK | query_dataframe | shape={output['shape']}")
+                        _sw(icon, label, ok=True)
+                    else:
+                        content = f"Error:\n{output['message']}"
+                        logger.warning(f"TOOL_FAIL | query_dataframe | {output['message']}")
+                        _sw(icon, label, ok=False)
+
+                elif name == "create_map":
+                    output = create_map(args["code"], df_taxo, df_host)
+                    if output["success"]:
+                        executed_codes.append(args["code"])
+                        used_sources.add("Dataset map")
+                        generated_figures.append(output["figure"])
+                        content = "Map created successfully."
+                        logger.info("TOOL_OK | create_map")
+                        _sw(icon, label, ok=True)
+                    else:
+                        content = f"Error:\n{output['message']}"
+                        logger.warning(f"TOOL_FAIL | create_map | {output['message']}")
+                        _sw(icon, label, ok=False)
+
+                elif name == "create_visualization":
+                    output = create_visualization(args["code"], df_taxo, df_host)
+                    if output["success"]:
+                        executed_codes.append(args["code"])
+                        used_sources.add("Dataset visualization")
+                        generated_figures.append(output["figure"])
+                        content = "Visualization created successfully."
+                        logger.info("TOOL_OK | create_visualization")
+                        _sw(icon, label, ok=True)
+                    else:
+                        content = f"Error:\n{output['message']}"
+                        logger.warning(f"TOOL_FAIL | create_visualization | {output['message']}")
+                        _sw(icon, label, ok=False)
+
                 else:
-                    content = output["message"]
-                    logger.warning(f"TOOL_FAIL | pubmed_search | {output['message']}")
-                    _sw(icon, label, ok=False)
+                    content = f"Unknown tool: {name}"
+                    logger.error(f"UNKNOWN_TOOL | {name}")
+                    _sw("🔧", name, ok=False)
 
-            elif name == "query_dataframe":
-                output = query_dataframe(args["code"], df_taxo, df_host, preview_rows=preview_rows)
-                if output["success"]:
-                    executed_codes.append(args["code"])
-                    used_sources.add("Dataset query")
-                    content = f"Query OK. Shape: {output['shape']}\nColumns: {', '.join(output['columns'])}\n{output['preview']}"
-                    logger.info(f"TOOL_OK | query_dataframe | shape={output['shape']}")
-                    _sw(icon, label, ok=True)
-                else:
-                    content = f"Error:\n{output['message']}"
-                    logger.warning(f"TOOL_FAIL | query_dataframe | {output['message']}")
-                    _sw(icon, label, ok=False)
+                # Truncate tool content to avoid Ollama 500s on large payloads
+                MAX_TOOL_CONTENT = DEFAULT_MAX_TOOL_CONTENT
+                if len(content) > MAX_TOOL_CONTENT:
+                    content = content[:MAX_TOOL_CONTENT] + f"\n\n[...truncated — {len(content) - MAX_TOOL_CONTENT} chars omitted]"
+                    logger.warning(f"TOOL_CONTENT_TRUNCATED | {name} | content trimmed to {MAX_TOOL_CONTENT} chars")
 
-            elif name == "create_map":
-                output = create_map(args["code"], df_taxo, df_host)
-                if output["success"]:
-                    executed_codes.append(args["code"])
-                    used_sources.add("Dataset map")
-                    generated_figures.append(output["figure"])
-                    content = "Map created successfully."
-                    logger.info("TOOL_OK | create_map")
-                    _sw(icon, label, ok=True)
-                else:
-                    content = f"Error:\n{output['message']}"
-                    logger.warning(f"TOOL_FAIL | create_map | {output['message']}")
-                    _sw(icon, label, ok=False)
-
-            elif name == "create_visualization":
-                output = create_visualization(args["code"], df_taxo, df_host)
-                if output["success"]:
-                    executed_codes.append(args["code"])
-                    used_sources.add("Dataset visualization")
-                    generated_figures.append(output["figure"])
-                    content = "Visualization created successfully."
-                    logger.info("TOOL_OK | create_visualization")
-                    _sw(icon, label, ok=True)
-                else:
-                    content = f"Error:\n{output['message']}"
-                    logger.warning(f"TOOL_FAIL | create_visualization | {output['message']}")
-                    _sw(icon, label, ok=False)
-
-            else:
-                content = f"Unknown tool: {name}"
-                logger.error(f"UNKNOWN_TOOL | {name}")
-                _sw("🔧", name, ok=False)
-
-            # Truncate tool content to avoid Ollama 500s on large payloads
-            MAX_TOOL_CONTENT = DEFAULT_MAX_TOOL_CONTENT
-            if len(content) > MAX_TOOL_CONTENT:
-                content = content[:MAX_TOOL_CONTENT] + f"\n\n[...truncated — {len(content) - MAX_TOOL_CONTENT} chars omitted]"
-                logger.warning(f"TOOL_CONTENT_TRUNCATED | {name} | content trimmed to {MAX_TOOL_CONTENT} chars")
-
-            messages.append(
-                {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
-            )
+                messages.append(
+                    {"role": "tool", "tool_call_id": call["id"], "name": name, "content": content}
+                )
 
 
 # ==================== MAIN ==================== #

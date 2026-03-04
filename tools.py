@@ -396,6 +396,8 @@ TOOLS_SPEC = [
                 "Examples:\n"
                 "data = df_taxo.groupby('family').size().reset_index(name='count')\n"
                 "fig = px.bar(data, x='family', y='count', title='Species per Family')"
+                "IMPORTANT: NEVER search with acronyms (HIV, HBV, etc.). Always use the full scientific name. "
+                "If the result is empty (0 rows), retry with a broader or alternate term before giving up.\n"
             ),
             "parameters": {
                 "type": "object",
@@ -416,20 +418,22 @@ TOOLS_SPEC = [
                 "EXACT TEMPLATE TO FOLLOW (mandatory, adapt only the filter term and title):\n"
                 "```\n"
                 "data = df_host[\n"
-                "    df_host['VIRAL_SPECIES'].str.contains('TERM', case=False, na=False) &\n"
-                "    (df_host['LOCALISATION_RESOLUTION'] == 'local')\n"
+                "    df_host['VIRAL_SPECIES'].str.contains('TERM', case=False, na=False)\n"
                 "].dropna(subset=['lat', 'lon'])\n"
                 "fig = px.scatter_mapbox(\n"
                 "    data, lat='lat', lon='lon',\n"
-                "    hover_name=...',\n"
-                "    hover_data=...,\n"
-                "    color='ORGANISM_NAME',\n"
+                "    hover_name='VIRAL_SPECIES',\n"
+                "    hover_data=['DATA_ID', 'TAX_ID'],\n"
+                "    color='VIRAL_SPECIES',\n"
                 "    zoom=1, title='TITLE'\n"
                 ")\n"
                 "fig.update_layout(mapbox_style='open-street-map')\n"
+                "```\n"
                 "Replace TERM with the relevant species/genus/family/id keyword from the user query.\n"
                 "Replace TITLE with a descriptive title.\n"
                 "You MUST assign the figure to 'fig'."
+                "IMPORTANT: NEVER search with acronyms (HIV, HBV, etc.). Always use the full scientific name. "
+                "If the result is empty (0 rows), retry with a broader or alternate term before giving up.\n"
             ),
             "parameters": {
                 "type": "object",
