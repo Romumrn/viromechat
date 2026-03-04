@@ -127,7 +127,7 @@ You have access to two curated datasets and external tools. You must ground ever
 AVAILABLE DATA
 ═══════════════════════════════════════════════
 
-`df_taxo` — Viral taxonomy database (NCBI/SRA)
+`df_taxo` — Taxonomy database (NCBI/SRA)
   Columns: {df_taxo_columns_str}
 
 `df_host` — Virus-host occurrence database (SRA)

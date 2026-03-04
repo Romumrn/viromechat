@@ -19,7 +19,7 @@ PAGE_ICON    = "🦠"
 GITHUB_URL   = "https://github.com/Romumrn/chat-virus-AI"
 
 # ==================== AGENT DEFAULTS ==================== #
-DEFAULT_TEMPERATURE    = 0.0
+DEFAULT_TEMPERATURE    = 0.5
 DEFAULT_TOP_P          = 1.0
 DEFAULT_REPEAT_PENALTY = 1.0
 DEFAULT_SEED           = 42
@@ -29,15 +29,3 @@ DEFAULT_MAX_TOOL_CONTENT = 2000   # chars — truncation limit sent back to the 
 # ==================== UI DEFAULTS ==================== #
 DEFAULT_PREVIEW_ROWS   = 50
 DEFAULT_WIKIPEDIA_LIMIT = 2000
-
-# ==================== TAXONOMY COLUMNS ==================== #
-# Expected column names in df_taxo — update here if the CSV schema changes
-TAXO_COL_FAMILY  = "family"
-TAXO_COL_GENUS   = "genus"
-TAXO_COL_SPECIES = "species"
-
-# ==================== HOST COLUMNS ==================== #
-# Expected column names in df_host — update here if the CSV schema changes
-HOST_COL_VIRUS   = "virus_name"
-HOST_COL_HOST    = "host_name"
-HOST_COL_COUNTRY = "country"
