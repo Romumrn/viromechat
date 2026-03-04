@@ -506,9 +506,8 @@ def main():
     st.caption("""
         For best results:
         - Use English and provide as much relevant detail as you can
-        - Ask precise and clearly formulated questions
-        - Double-check that your question is scientifically accurate
-        - Stupid question leads to stupid answer :) 
+        - Ask precise and clearly formulated questions, avoid acronym or abbreviation
+        - Stupid question leads to stupid answer ;) 
 
         Example questions:   
         - "Give me information about Orthopoxvirus. Is it a family or a genus? How many species does it include?"
