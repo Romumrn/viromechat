@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import os
+import json
 import logging
 from datetime import datetime 
 from tools import wikipedia_search, pubmed_search, TOOL_LABELS, query_dataframe, create_visualization, create_map, TOOLS_SPEC
@@ -14,6 +15,8 @@ from config import (
     DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CONTENT,
     DEFAULT_PREVIEW_ROWS, DEFAULT_WIKIPEDIA_LIMIT
 )
+
+REPORT_DIR = os.path.join(LOG_DIR, "error_reports")
 
 
 # ==================== LOGGER SETUP ==================== #
@@ -71,6 +74,48 @@ def load_dataframe(path):
         return None
     return pd.read_csv(path)
 
+
+# ==================== ERROR REPORT ==================== #
+
+def save_error_report(question: str, answer: str, executed_codes: list, comment: str = ""):
+    """
+    Save an error report as a JSON file in REPORT_DIR.
+    Also extracts the relevant log lines (same minute) and appends them.
+    """
+    os.makedirs(REPORT_DIR, exist_ok=True)
+
+    timestamp = datetime.now()
+    ts_str = timestamp.strftime("%Y%m%d_%H%M%S")
+    report_path = os.path.join(REPORT_DIR, f"report_{ts_str}.json")
+
+    # Retrieve log lines matching the current session (today's date prefix)
+    log_filename = os.path.join(LOG_DIR, f"agent_{timestamp.strftime('%Y-%m')}.log")
+    related_logs = []
+    if os.path.exists(log_filename):
+        try:
+            with open(log_filename, "r", encoding="utf-8") as f:
+                all_lines = f.readlines()
+            # Keep last 200 lines maximum to capture the current query context
+            related_logs = [l.rstrip() for l in all_lines[-200:]]
+        except Exception:
+            related_logs = ["[Could not read log file]"]
+
+    report = {
+        "timestamp": timestamp.isoformat(),
+        "user_comment": comment,
+        "question": question,
+        "answer": answer,
+        "executed_codes": executed_codes,
+        "recent_logs": related_logs,
+    }
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    logger.warning(f"ERROR_REPORT | Saved to {report_path} | comment={comment!r}")
+    return report_path
+
+
 # ==================== SOURCES DISPLAY ==================== #
 
 def render_sources(wikipedia_urls, pubmed_urls, executed_codes):
@@ -86,7 +131,6 @@ def render_sources(wikipedia_urls, pubmed_urls, executed_codes):
         if pubmed_urls:
             st.markdown("**🔬 PubMed**")
             for url in pubmed_urls:
-                # Extraire le PMID de l'URL pour l'affichage
                 pmid = url.split('/')[-2] if url.endswith('/') else url.split('/')[-1]
                 st.markdown(f"- [PMID: {pmid}]({url})")
         if executed_codes:
@@ -96,6 +140,48 @@ def render_sources(wikipedia_urls, pubmed_urls, executed_codes):
                 for i, code in enumerate(executed_codes, 1)
             )
             st.code(full_code, language="python")
+
+
+# ==================== ERROR REPORT BUTTON ==================== #
+
+def render_report_button(msg_idx: int, question: str, answer: str, executed_codes: list):
+    """
+    Render a small 'Report an error' button below an assistant message.
+    Uses a session-state flag to avoid duplicate submissions.
+    """
+    report_key = f"reported_{msg_idx}"
+    dialog_key = f"show_dialog_{msg_idx}"
+
+    # Already reported
+    if st.session_state.get(report_key):
+        st.caption("⚠️ Error reported — thank you for your feedback.")
+        return
+
+    # Toggle the comment dialog
+    if st.button("🚩 Report an error", key=f"btn_report_{msg_idx}", help="Signal a wrong or misleading answer"):
+        st.session_state[dialog_key] = not st.session_state.get(dialog_key, False)
+
+    if st.session_state.get(dialog_key):
+        with st.container(border=True):
+            st.markdown("**What went wrong?** *(optional)*")
+            comment = st.text_area(
+                "Your comment",
+                key=f"comment_{msg_idx}",
+                placeholder="e.g. Wrong species name, incorrect count, hallucinated data…",
+                label_visibility="collapsed",
+            )
+            col1, col2 = st.columns([1, 5])
+            with col1:
+                if st.button("Send report", key=f"send_report_{msg_idx}", type="primary"):
+                    path = save_error_report(question, answer, executed_codes, comment)
+                    st.session_state[report_key] = True
+                    st.session_state[dialog_key] = False
+                    st.success(f"Report saved ✅")
+                    st.rerun()
+            with col2:
+                if st.button("Cancel", key=f"cancel_report_{msg_idx}"):
+                    st.session_state[dialog_key] = False
+                    st.rerun()
 
 
 # ==================== AGENT LOOP ==================== #
@@ -210,9 +296,6 @@ RESPONSE STYLE
     tool_call_count = 0
 
     def _sw(icon, label, ok=None):
-        """Write a step line into the st.status container if available.
-        ok=None → running (no checkmark), ok=True → ✅, ok=False → ❌
-        """
         if status_container is None:
             return
         if ok is None:
@@ -263,7 +346,6 @@ RESPONSE STYLE
         if thinking := msg.get("thinking"):
             logger.info(f"THINKING | {thinking[:600]}{'...' if len(thinking) > 600 else ''}")
 
-        # ── Stop condition — no more tool calls ──
         if "tool_calls" not in msg:
             messages.append(msg)
             logger.info(f"RESULT | {msg['content'][:500]}{'...' if len(msg['content']) > 500 else ''}")
@@ -289,7 +371,6 @@ RESPONSE STYLE
                 icon, label = TOOL_LABELS.get(name, ("🔧", name))
                 _sw(icon, label)
 
-                # ── Execute the tool ──
                 if name == "wikipedia_search":
                     output = wikipedia_search(**args, wikipedia_limit=wikipedia_limit)
                     if output["success"]:
@@ -382,7 +463,6 @@ RESPONSE STYLE
                     logger.error(f"UNKNOWN_TOOL | {name}")
                     _sw("🔧", name, ok=False)
 
-                # Truncate tool content to avoid Ollama 500s on large payloads
                 MAX_TOOL_CONTENT = DEFAULT_MAX_TOOL_CONTENT
                 if len(content) > MAX_TOOL_CONTENT:
                     content = content[:MAX_TOOL_CONTENT] + f"\n\n[...truncated — {len(content) - MAX_TOOL_CONTENT} chars omitted]"
@@ -505,12 +585,10 @@ More coming soon!
     # ── Chat history display ──
     for msg_idx, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
-            # Skip messages still being generated (no content yet)
             if not msg.get("content"):
                 continue
             st.markdown(msg["content"])
 
-            # ── FIX: Stable figure keys using only msg/fig index ──
             for fig_idx, fig in enumerate(msg.get("figures", [])):
                 st.plotly_chart(
                     fig,
@@ -518,12 +596,24 @@ More coming soon!
                     config={'displayModeBar': True, 'scrollZoom': True}
                 )
 
-            # ── FIX: Factorised sources rendering ──
             render_sources(
                 msg.get("wikipedia_urls", []), 
                 msg.get("pubmed_urls", []), 
                 msg.get("executed_codes", [])
             )
+
+            # ── Error report button for assistant messages in history ──
+            if msg["role"] == "assistant":
+                # Find the preceding user question
+                question = ""
+                if msg_idx > 0 and st.session_state.messages[msg_idx - 1]["role"] == "user":
+                    question = st.session_state.messages[msg_idx - 1].get("content", "")
+                render_report_button(
+                    msg_idx=msg_idx,
+                    question=question,
+                    answer=msg["content"],
+                    executed_codes=msg.get("executed_codes", []),
+                )
 
     # ── Chat input ──
     if query := st.chat_input("Ask about viruses..."):
@@ -532,7 +622,6 @@ More coming soon!
             st.markdown(query)
 
         with st.chat_message("assistant"):
-            # ── Spinner visible only during generation, removed after ──
             status_placeholder = st.empty()
             status_container = status_placeholder.status("Processing...", expanded=True)
 
@@ -551,12 +640,11 @@ More coming soon!
                 status_container=status_container,
             )
 
-            # Clear the spinner entirely once done
             status_placeholder.empty()
 
             st.markdown(answer)
 
-            new_msg_idx = len(st.session_state.messages)  # index of the soon-to-be-appended message
+            new_msg_idx = len(st.session_state.messages)
             for fig_idx, fig in enumerate(figures):
                 st.plotly_chart(
                     fig,
@@ -565,6 +653,14 @@ More coming soon!
                 )
                 
             render_sources(wikipedia_urls, pubmed_urls, executed_codes)
+
+            # ── Error report button for the new response ──
+            render_report_button(
+                msg_idx=new_msg_idx,
+                question=query,
+                answer=answer,
+                executed_codes=executed_codes,
+            )
 
         st.session_state.messages.append({
             "role": "assistant",
