@@ -18,34 +18,9 @@ from config import (
 
 REPORT_DIR = os.path.join(LOG_DIR, "error_reports")
 
+from logging_utils import setup_logger
 
-# ==================== LOGGER SETUP ==================== #
-
-def setup_logger():
-    os.makedirs(LOG_DIR, exist_ok=True)
-    log_filename = f"{LOG_DIR}/agent_{datetime.now().strftime('%Y-%m')}.log"
-
-    logger = logging.getLogger("virus_agent")
-    if logger.handlers:
-        return logger
-
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
-
-    file_handler = logging.FileHandler(log_filename, encoding="utf-8")
-    file_handler.setFormatter(formatter)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    return logger
-
-
-logger = setup_logger()
-
+logger = setup_logger(LOG_DIR)
 
 # ==================== PASSWORD ==================== #
 
