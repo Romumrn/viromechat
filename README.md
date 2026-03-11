@@ -166,3 +166,8 @@ This architecture enables auditability and reproducible AI-assisted analysis.
 
 This system is intended for exploratory and research support purposes only.
 All outputs should be independently verified before use in scientific or medical contexts.
+
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0).
