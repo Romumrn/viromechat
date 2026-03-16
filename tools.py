@@ -44,7 +44,7 @@ def _check_figure_has_data(fig: go.Figure) -> bool:
     return False
 
 
-def _check_data_not_empty(env: dict, code: str) -> str | None:
+def _check_data_not_empty(env: dict, code: str):
     """
     After exec(), inspect variables named 'data' or 'result' in env.
     If a DataFrame is found and is empty, return an error message.
