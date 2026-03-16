@@ -16,6 +16,52 @@ TOOL_LABELS = {
     "create_map":           ("🗺️",  "Creating map"),
 }
 
+# ==================== HELPERS ==================== #
+
+def _check_figure_has_data(fig: go.Figure) -> bool:
+    """
+    Returns True if the figure contains at least one trace with actual data points.
+    Catches empty figures produced from empty dataframes.
+    """
+    for trace in fig.data:
+        # scatter / scatter_mapbox / bar / pie ...
+        x = getattr(trace, "x", None)
+        y = getattr(trace, "y", None)
+        lat = getattr(trace, "lat", None)
+        lon = getattr(trace, "lon", None)
+        values = getattr(trace, "values", None)  # pie chart
+
+        if lat is not None and lon is not None:
+            if hasattr(lat, "__len__") and len(lat) > 0:
+                return True
+        if x is not None:
+            if hasattr(x, "__len__") and len(x) > 0:
+                return True
+        if values is not None:
+            if hasattr(values, "__len__") and len(values) > 0:
+                return True
+    print( "HEllo this is the function ")
+    return False
+
+
+def _check_data_not_empty(env: dict, code: str) -> str | None:
+    """
+    After exec(), inspect variables named 'data' or 'result' in env.
+    If a DataFrame is found and is empty, return an error message.
+    Returns None if everything looks fine.
+    """
+    for varname in ("data", "result", "df_filtered", "df"):
+        val = env.get(varname)
+        if isinstance(val, pd.DataFrame) and val.empty:
+            return (
+                f"Error: the DataFrame '{varname}' used to build the figure is empty (0 rows). "
+                "The search term returned no results in the dataset. "
+                "Try a broader term, the full scientific species name instead of an acronym, "
+                "or use str.contains() with a partial name match."
+            )
+    return None
+
+
 # ==================== TOOL IMPLEMENTATIONS ==================== #
 
 def wikipedia_search(search_term: str, wikipedia_limit: int) -> dict:
@@ -30,7 +76,7 @@ def wikipedia_search(search_term: str, wikipedia_limit: int) -> dict:
         "format": "json",
         "prop": "extracts",
         "explaintext": 1,
-        "redirects": 1,   # ← crucial
+        "redirects": 1,
         "titles": term
     }
 
@@ -59,7 +105,7 @@ def wikipedia_search(search_term: str, wikipedia_limit: int) -> dict:
                 }
 
     except requests.RequestException:
-        pass  # on laisse le fallback gérer
+        pass
 
     # 2️⃣ Fallback : recherche textuelle
     search_params = {
@@ -83,7 +129,6 @@ def wikipedia_search(search_term: str, wikipedia_limit: int) -> dict:
 
         best_match_title = search_results[0]["title"]
 
-        # 3️⃣ Récupération du meilleur match
         page_params = {
             "action": "query",
             "format": "json",
@@ -128,12 +173,7 @@ def wikipedia_search(search_term: str, wikipedia_limit: int) -> dict:
 
 
 def pubmed_search(query: str, max_results: int = 3) -> dict:
-    """
-    Recherche sur PubMed via l'API E-utilities de NCBI.
-    Retourne les abstracts des 2-3 premiers articles trouvés.
-    """
     try:
-        # Étape 1: Recherche des IDs (ESearch)
         search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         search_params = {
             "db": "pubmed",
@@ -142,66 +182,60 @@ def pubmed_search(query: str, max_results: int = 3) -> dict:
             "retmax": max_results,
             "sort": "relevance"
         }
-        
+
         search_response = requests.get(
-            search_url, 
-            params=search_params, 
+            search_url,
+            params=search_params,
             headers={"User-Agent": "VirusAgent/1.0"}
         )
-        
+
         if search_response.status_code != 200:
             return {
-                "success": False, 
+                "success": False,
                 "message": f"PubMed search failed with status {search_response.status_code}"
             }
-        
+
         search_data = search_response.json()
         id_list = search_data.get("esearchresult", {}).get("idlist", [])
-        
+
         if not id_list:
             return {
-                "success": False, 
+                "success": False,
                 "message": f"No articles found on PubMed for '{query}'"
             }
-        
-        # Étape 2: Récupération des détails (EFetch)
+
         fetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         fetch_params = {
             "db": "pubmed",
             "id": ",".join(id_list),
             "retmode": "xml"
         }
-        
+
         fetch_response = requests.get(
-            fetch_url, 
-            params=fetch_params, 
+            fetch_url,
+            params=fetch_params,
             headers={"User-Agent": "VirusAgent/1.0"}
         )
-        
+
         if fetch_response.status_code != 200:
             return {
-                "success": False, 
-                "message": f"Failed to fetch article details from PubMed"
+                "success": False,
+                "message": "Failed to fetch article details from PubMed"
             }
-        
-        # Parsing XML
+
         root = ET.fromstring(fetch_response.content)
         articles = []
-        
+
         for article in root.findall(".//PubmedArticle"):
-            # PMID
             pmid = article.find(".//PMID")
             pmid_text = pmid.text if pmid is not None else "N/A"
-            
-            # Titre
+
             title_elem = article.find(".//ArticleTitle")
             title = title_elem.text if title_elem is not None else "No title available"
-            
-            # Abstract
+
             abstract_elem = article.find(".//Abstract/AbstractText")
             abstract = abstract_elem.text if abstract_elem is not None else "No abstract available"
-            
-            # Auteurs
+
             authors = []
             for author in article.findall(".//Author"):
                 last_name = author.find("LastName")
@@ -211,40 +245,37 @@ def pubmed_search(query: str, max_results: int = 3) -> dict:
                     if fore_name is not None:
                         name = f"{fore_name.text} {name}"
                     authors.append(name)
-            
-            # Journal
+
             journal_elem = article.find(".//Journal/Title")
             journal = journal_elem.text if journal_elem is not None else "Unknown journal"
-            
-            # Année
+
             year_elem = article.find(".//PubDate/Year")
             year = year_elem.text if year_elem is not None else "Unknown year"
-            
-            # DOI
+
             doi_elem = article.find(".//ArticleId[@IdType='doi']")
             doi = doi_elem.text if doi_elem is not None else None
-            
+
             articles.append({
                 "pmid": pmid_text,
                 "title": title,
                 "abstract": abstract,
-                "authors": authors[:3],  # Limiter aux 3 premiers auteurs
+                "authors": authors[:3],
                 "journal": journal,
                 "year": year,
                 "doi": doi,
                 "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid_text}/"
             })
-        
+
         return {
             "success": True,
             "query": query,
             "count": len(articles),
             "articles": articles
         }
-        
+
     except Exception as e:
         return {
-            "success": False, 
+            "success": False,
             "message": f"Error searching PubMed: {str(e)}\n{traceback.format_exc()}"
         }
 
@@ -261,6 +292,18 @@ def query_dataframe(code: str, df_taxo: pd.DataFrame, df_host: pd.DataFrame, pre
         if not isinstance(result, pd.DataFrame):
             return {"success": False, "message": f"Error: 'result' must be a pandas DataFrame, got {type(result)}"}
 
+        # ── Empty result guard ──
+        if result.empty:
+            return {
+                "success": False,
+                "message": (
+                    "Error: query returned 0 rows. "
+                    "The search term yielded no results in the dataset. "
+                    "Try a broader term, use the full scientific species name instead of an acronym, "
+                    "or use str.contains() with a partial/genus-level name match."
+                )
+            }
+
         preview = (
             result.to_string(index=False) if len(result) <= preview_rows
             else result.head(preview_rows).to_string(index=False) + f"\n... and {len(result) - preview_rows} more rows"
@@ -276,12 +319,30 @@ def create_visualization(code: str, df_taxo: pd.DataFrame, df_host: pd.DataFrame
         env = {"df_taxo": df_taxo, "df_host": df_host, "pd": pd, "np": np, "px": px, "go": go}
         exec(code, {}, env)
 
+        # ── Empty data guard (before checking fig) ──
+        empty_err = _check_data_not_empty(env, code)
+        if empty_err:
+            return {"success": False, "message": empty_err}
+
         if "fig" not in env:
             return {"success": False, "message": "Error: code must assign 'fig' variable (Plotly figure)"}
 
         fig = env["fig"]
         if not isinstance(fig, (go.Figure, go.FigureWidget)):
             return {"success": False, "message": f"Error: 'fig' must be a Plotly figure, got {type(fig)}"}
+
+        # ── Empty figure guard ──
+        if not _check_figure_has_data(fig):
+            return {
+                "success": False,
+                "message": (
+                    "Error: the figure was created but contains no data points (empty chart). "
+                    "The filter likely returned 0 rows. "
+                    "Use the full scientific species name instead of an acronym (e.g. 'Lentivirus humimdef1' not 'HIV'). "
+                    "Try str.contains() with a partial or genus-level term, or call query_dataframe first "
+                    "to verify which names exist in the dataset."
+                )
+            }
 
         return {"success": True, "figure": fig}
 
@@ -297,12 +358,30 @@ def create_map(code: str, df_taxo: pd.DataFrame, df_host: pd.DataFrame) -> dict:
         }
         exec(code, {}, env)
 
+        # ── Empty data guard (before checking fig) ──
+        empty_err = _check_data_not_empty(env, code)
+        if empty_err:
+            return {"success": False, "message": empty_err}
+
         if "fig" not in env:
             return {"success": False, "message": "Error: code must assign 'fig' variable (Plotly figure)"}
 
         fig = env["fig"]
         if not isinstance(fig, (go.Figure, go.FigureWidget)):
             return {"success": False, "message": f"Error: 'fig' must be a Plotly figure, got {type(fig)}"}
+
+        # ── Empty figure guard ──
+        if not _check_figure_has_data(fig):
+            return {
+                "success": False,
+                "message": (
+                    "Error: the map was created but contains no data points (empty map). "
+                    "The filter likely returned 0 rows — no matching entries found in df_host. "
+                    "Use the full scientific species name instead of an acronym (e.g. 'Orthopoxvirus' not 'MPOX'). "
+                    "Try str.contains() with a partial name, genus, or family keyword. "
+                    "Call query_dataframe first to inspect what names are actually present."
+                )
+            }
 
         return {"success": True, "figure": fig}
 
@@ -395,9 +474,9 @@ TOOLS_SPEC = [
                 "You MUST assign your Plotly figure to the variable 'fig'\n\n"
                 "Examples:\n"
                 "data = df_taxo.groupby('family').size().reset_index(name='count')\n"
-                "fig = px.bar(data, x='family', y='count', title='Species per Family')"
+                "fig = px.bar(data, x='family', y='count', title='Species per Family')\n\n"
                 "IMPORTANT: NEVER search with acronyms (HIV, HBV, etc.). Always use the full scientific name. "
-                "If the result is empty (0 rows), retry with a broader or alternate term before giving up.\n"
+                "If the tool returns an error about empty data or empty figure, retry with a broader or alternate term."
             ),
             "parameters": {
                 "type": "object",
@@ -431,9 +510,9 @@ TOOLS_SPEC = [
                 "```\n"
                 "Replace TERM with the relevant species/genus/family/id keyword from the user query.\n"
                 "Replace TITLE with a descriptive title.\n"
-                "You MUST assign the figure to 'fig'."
+                "You MUST assign the figure to 'fig'.\n\n"
                 "IMPORTANT: NEVER search with acronyms (HIV, HBV, etc.). Always use the full scientific name. "
-                "If the result is empty (0 rows), retry with a broader or alternate term before giving up.\n"
+                "If the tool returns an error about empty data or empty map, retry with a broader or alternate term."
             ),
             "parameters": {
                 "type": "object",

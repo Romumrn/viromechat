@@ -456,7 +456,7 @@ def main():
     if st.secrets.get("PASSWORD_ENABLED", False):
         check_password()
 
-    st.title("Welcome PRABI :) ")
+    st.title("Welcome :) ")
     st.markdown(
         """
         <style>
@@ -492,9 +492,9 @@ def main():
     """)
 
     with st.sidebar:
-        st.title("Virus Dataset AI Agent 🦠 ")
+        st.title("ViromeChat-AI 🦠 ")
         st.caption("""
-Explore the viral world through AI-assisted analysis of curated bioinformatics datasets.
+A conversational interface to explore viral metagenomic data in the Virome@tlas project.
 
 Ask about:
 - Taxonomy information: families, genera, species
