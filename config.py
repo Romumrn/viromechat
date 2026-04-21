@@ -24,7 +24,7 @@ DEFAULT_TOP_P          = 1.0
 DEFAULT_REPEAT_PENALTY = 1.0
 DEFAULT_SEED           = 42
 DEFAULT_MAX_TOOL_CALLS = 7
-DEFAULT_MAX_TOOL_CONTENT = 2000   # chars — truncation limit sent back to the model
+DEFAULT_MAX_TOOL_CONTENT = 4000   # chars — truncation limit sent back to the model
 
 # ==================== UI DEFAULTS ==================== #
 DEFAULT_PREVIEW_ROWS   = 50

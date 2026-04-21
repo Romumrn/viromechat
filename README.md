@@ -15,35 +15,41 @@ The Virus Dataset AI Agent supports this effort by providing a controlled, repro
 
 By constraining the language model to explicit data sources and documented tool calls, the system aims to reduce hallucination risk while preserving interpretability and scientific traceability.
 
-##  Data Sources
+---
+
+## Data Sources
 
 The system operates on structured viral datasets:
 
 ```
 data/
-├── viral_taxo.csv
-└── virushostdb.tsv
+├── viral_taxo.csv        # Viral taxonomy (NCBI/SRA)
+└── virushostdb.tsv       # Virus–host occurrences (SRA)
 ```
 
 ### Viral Taxonomy Dataset (`viral_taxo.csv`)
 
 * Taxonomic hierarchy (species, genus, family, order, etc.)
-* Associated genomic and metadata attributes
+* Associated genomic and ecological metadata
 * Derived from SRA taxonomy records
+* Key columns: `TAX_ID`, `ORGANISM_NAME`, `RANK`, `GENUS_NAME`, `FAMILY_NAME`, `DIVISION_NAME`
 
 ### Virus–Host Dataset (`virushostdb.tsv`)
 
-* Virus–host relationships
-* Derived from VirusHostDB ([genome.jp](https://www.genome.jp/virushostdb/)) 
+* Virus–host occurrence records with geographic coordinates
+* Derived from VirusHostDB ([genome.jp](https://www.genome.jp/virushostdb/)) and SRA
+* Key columns: `DATA_ID`, `VIRAL_TAX_ID`, `VIRAL_SPECIES`, `TAX_ID` (host), `lon`, `lat`
+* Host names are resolved via `TAX_ID` join with `viral_taxo.csv` — the `SPECIES_NAME` column is intentionally sparse
 
 All quantitative results originate strictly from these datasets.
 
+---
 
 ## Agent Architecture
 
-The agent uses a controlled tool-calling loop powered by a local LLM via Ollama.
+The agent uses a controlled tool-calling loop powered by the **Albert API** (French government sovereign AI infrastructure), using the `gpt-oss-120b` model via an OpenAI-compatible endpoint.
 
-### tools:
+### Tools
 
 #### `query_dataframe`
 
@@ -52,121 +58,136 @@ Executes validated pandas code on the dataset.
 * Returns structured DataFrame output
 * Restricts access to known columns
 * Enforces assignment to a `result` variable
-* Provides reproducible previews
+* Result cache prevents redundant identical calls
 
-####  `create_visualization`
+#### `create_visualization`
 
-Generates Plotly figures.
+Generates interactive Plotly figures.
 
-* Only permitted after structured queries
 * Requires explicit `fig` assignment
 * Produces deterministic visual outputs
 
-####  `wikipedia_search`
+#### `create_map`
+
+Generates geographic Plotly maps from occurrence coordinates.
+
+* Triggered automatically for spatial/distribution questions
+* Uses `lon`/`lat` columns from the virus–host dataset
+
+#### `wikipedia_search`
 
 Retrieves biological summaries from Wikipedia.
 
 * Plain-text extraction only
-* Character-limited responses
+* Character-limited responses (configurable)
 * Explicit source URLs returned
-* No interpretation layer added
+* Fuzzy matching for approximate name resolution
 
+#### `pubmed_search`
 
-##  Scientific Constraints
+Retrieves scientific article abstracts from PubMed.
 
-The AI operates under strict rules trought the prompt and parameters:
+* Returns title, authors, journal, year, abstract, DOI, PMID
+* Only confirmed PMIDs from actual tool calls are allowed in responses
+* Hallucinated PMIDs are automatically detected and stripped before display
+
+---
+
+## Scientific Constraints
+
+The AI operates under strict rules enforced through the system prompt and post-processing:
 
 * No invention of taxa, species counts, or biological claims
-* No use of implicit or hidden knowledge
+* No implicit or hidden knowledge — all statements must be grounded in data or tool output
 * No speculative interpretation
-* All biological statements must originate from:
-
-  * dataset queries, or
-  * documented Wikipedia tool calls
+* **Host lookup is two-step**: host name → `TAX_ID` via `viral_taxo.csv`, then `TAX_ID` match in the occurrence table
+* **PMID hallucination guard**: a whitelist of real PMIDs is built from actual `pubmed_search` calls; any PMID absent from this whitelist is stripped from the final response and logged as a warning
 * If information is unavailable, the agent states explicitly:
 
-> “This information is not available in the current dataset or sources.”
+> "This information is not available in the current dataset or sources."
 
-This constraint framework is designed to reduce hallucination risk and increase reproducibility.
+---
 
+## Capabilities
 
-##  Capabilities
+* Natural language querying of viral taxonomy and virus–host relationships
+* Two-step host resolution (name → TAX_ID → occurrence records)
+* Aggregation, comparative analysis, species/genus/family counts
+* Interactive Plotly visualizations and geographic maps
+* Wikipedia and PubMed integration for biological context
+* Error reporting system (user-facing feedback button)
+* Full session logging with tool call tracing
 
-* Natural language querying of viral taxonomy
-* Aggregation and comparative analysis
-* Species, genus, and family counts
-* Structured filtering and grouping
-* Interactive Plotly visualizations
-* Virus–host relationship exploration
-* Explicit source documentation
-* and more ...
+---
 
-## Local Execution
-
-The system runs entirely locally:
-
-* LLM inference via Ollama
-* No external LLM APIs required
-* Wikipedia access via public API
-* All dataset processing performed locally
-
-This enables reproducibility and data control in research environments.
-
-
-## Installation
+## Deployment
 
 ### Requirements
 
 * Python 3.9+
-* Ollama installed and running
-* A tool-capable model (e.g., `gpt-oss`, check ollama webpage tools )
+* An **Albert API key** ([albert.api.etalab.gouv.fr](https://albert.api.etalab.gouv.fr))
 * Python packages:
 
-  * streamlit
-  * pandas
-  * numpy
-  * requests
-  * plotly
+```
+streamlit
+pandas
+numpy
+requests
+plotly
+```
 
+### Configuration
+
+Create `.streamlit/secrets.toml`:
+
+```toml
+ALBERT_API_KEY = "your_key_here"
+
+# Optional access protection
+PASSWORD_ENABLED = true
+ACCESS_CODE = "your_access_code"
+```
 
 ### Commands
 
 ```bash
 pip install streamlit pandas numpy requests plotly
 
-# Pull a Model
-ollama pull gpt-oss
-
-# Run the Application
-streamlit run app.py
+streamlit run app_albert.py
 ```
 
+---
 
 ## Example Research Queries
 
-* “Summarize Orthopoxvirus (family, genus, species count)”
-* “List virus families with more than 100 recorded species”
-* “Compare species counts between Orthomyxoviridae and Coronaviridae”
-* “Show a pie chart of genus distribution in Poxviridae”
-* “Give me hosts of Orthopoxvirus Abatino”
+* "Summarize Orthopoxvirus (family, genus, species count)"
+* "List virus families with more than 100 recorded species"
+* "Compare species counts between Orthomyxoviridae and Coronaviridae"
+* "Show a pie chart of genus distribution in Poxviridae"
+* "World distribution of Poxviridae"
+* "What viruses infect Bos taurus?"
+* "Tell me more about feline viruses"
 
+---
 
 ## Transparency & Reproducibility
 
-* Executed pandas code can be inspected
-* Generated visualizations are deterministic
-* Wikipedia URLs are explicitly displayed
-* Tool calls are limited and traceable
-* Dataset access is column-restricted
+* Executed pandas code is visible in the "Sources" expander of each response
+* Generated visualizations are deterministic given the same dataset
+* Wikipedia and PubMed URLs are explicitly displayed per response
+* Tool calls are limited, numbered, and fully traced in logs (`agent_YYYY-MM.log`)
+* All PMID citations are verified against actual tool call output — hallucinated PMIDs are logged and removed
+* Error reports (question, answer, executed code, log excerpt) can be submitted via the in-app feedback button
 
-This architecture enables auditability and reproducible AI-assisted analysis.
-
+---
 
 ## ⚠️ Disclaimer
 
 This system is intended for exploratory and research support purposes only.
 All outputs should be independently verified before use in scientific or medical contexts.
+The agent may miss viruses absent from the SRA-derived dataset, and dataset coverage does not reflect epidemiological prevalence or clinical severity.
 
+---
 
 ## License
 
