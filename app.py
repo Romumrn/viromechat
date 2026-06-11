@@ -1,16 +1,10 @@
 #!/usr/bin/python3
 """
-app_albert.py — ViromeChat-AI adapted for Albert API (etalab / OpenAI-compatible)
-
-Changes vs original app.py (Ollama):
-  - HTTP calls → POST https://albert.api.etalab.gouv.fr/v1/chat/completions
-  - Auth header → Authorization: Bearer <ALBERT_API_KEY>
-  - Response parsing → choices[0].message  (OpenAI format)
-  - tool_calls arguments → JSON string, need json.loads()
-  - Model listing → GET /v1/models
-  - Removed Ollama-specific options (repeat_penalty, seed)
-  - Added retry logic on 429 rate-limit responses
-  - Robust argument parser for known vLLM/gpt-oss-120b tool_call bug
+ViromeChat-AI: A conversational interface for exploring viral metagenomic data.
+Uses Albert API (OpenAI-compatible) with tool-calling capabilities for:
+- Dataset queries (taxonomy and host databases)
+- Wikipedia and PubMed searches
+- Data visualization and mapping
 """
 
 import streamlit as st
@@ -23,64 +17,82 @@ import time
 import re
 from datetime import datetime
 
+# Local imports
+from prompt import build_system_prompt
 from tools import (
     wikipedia_search, pubmed_search, TOOL_LABELS,
     query_dataframe, create_visualization, create_map, TOOLS_SPEC,
 )
 from config import (
+    
+    ALBERT_BASE_URL, ALBERT_TIMEOUT, ALBERT_MODEL_DEFAULT
     TAXO_DB_PATH, HOST_DB_PATH, LOG_DIR,
     PAGE_ICON, GITHUB_URL,
-    DEFAULT_TEMPERATURE, DEFAULT_TOP_P,
+    DEFAULT_TEMPERATURE, DEFAULT_TOP_P,DEFAULT_PRESENCE_PENALTY,
+    DEFAULT_FREQUENCY_PENALTY,
+    DEFAULT_MAX_COMPLETION_TOKENS,
+    DEFAULT_PARALLEL_TOOL_CALLS,DEFAULT_SEED,
     DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CONTENT,
     DEFAULT_PREVIEW_ROWS, DEFAULT_WIKIPEDIA_LIMIT,
 )
-
-# ── Albert API constants ──────────────────────────────────────────────────────
-ALBERT_BASE_URL      = "https://albert.api.etalab.gouv.fr/v1"
-ALBERT_TIMEOUT       = 180          # seconds — large model can be slow
-ALBERT_MODEL_DEFAULT = "AgentPublic/gptoss120b"  # adjust if exact name differs
-REPORT_DIR           = os.path.join(LOG_DIR, "error_reports")
-
 from logging_utils import setup_logger
+
+
+# ── Logging & Error Reporting ─────────────────────────────────────────────────
+REPORT_DIR = os.path.join(LOG_DIR, "error_reports")
 logger = setup_logger(LOG_DIR)
 
-# ==================== PMID HALLUCINATION GUARD ==================== #
 
-import re as _re
+# ==================== PMID HALLUCINATION GUARD ====================
 
 def _strip_hallucinated_pmids(text: str, real_pmids: set) -> tuple[str, list]:
-    pattern = _re.compile(r'\bPMID[:\s#]*([0-9]{5,9})\b', _re.IGNORECASE)
+    """
+    Remove PMID references that were hallucinated by the model (not from actual PubMed searches).
+    
+    Args:
+        text: The model's output text to clean
+        real_pmids: Set of PMIDs that were actually returned by pubmed_search calls
+    
+    Returns:
+        Tuple of (cleaned_text, list_of_removed_pmids)
+    """
+    # Match PMID references in various formats: PMID:12345678, PMID #12345678, etc.
+    pattern = re.compile(r'\bPMID[:\s#]*([0-9]{5,9})\b', re.IGNORECASE)
     removed = []
     
-    def _replace(m):
-        pmid = m.group(1)
+    def _replace(match):
+        pmid = match.group(1)
         if pmid in real_pmids:
-            return m.group(0)
+            return match.group(0)  # Keep real PMIDs
         removed.append(pmid)
-        return ""
+        return ""  # Remove hallucinated PMIDs
     
     cleaned = pattern.sub(_replace, text)
     
-    # Nettoyer les ponctuations orphelines
-    cleaned = _re.sub(r'\(e\.g\.\s*,?\s*on\s+[^)]{0,80}\)', '', cleaned)
-    cleaned = _re.sub(r'\(see\s*\)', '', cleaned)
+    # Clean up orphaned punctuation and references left by PMID removal
+    cleaned = re.sub(r'\(e\.g\.\s*,?\s*on\s+[^)]{0,80}\)', '', cleaned)
+    cleaned = re.sub(r'\(see\s*\)', '', cleaned)
     
-    # CORRECTION ICI : ne remplacer que les espaces/tabulations multiples
-    # [ \t]+ = espace ou tabulation, mais PAS \n
-    cleaned = _re.sub(r'[ \t]+', ' ', cleaned)
+    # Normalize whitespace: collapse multiple spaces/tabs but preserve newlines
+    cleaned = re.sub(r'[ \t]+', ' ', cleaned)
     
-    # Préserver la structure markdown : max 2 sauts de ligne consécutifs
-    cleaned = _re.sub(r'\n{3,}', '\n\n', cleaned)
+    # Preserve markdown structure: max 2 consecutive newlines
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
     
     cleaned = cleaned.strip()
     return cleaned, removed
-# ==================== PASSWORD ==================== #
+
+
+# ==================== PASSWORD PROTECTION ====================
 
 def check_password():
+    """Simple password gate using Streamlit secrets."""
     if st.session_state.get("authenticated"):
         return
+    
     st.title("Access Required")
     pwd = st.text_input("Enter access code", type="password")
+    
     if st.button("Login"):
         if pwd == st.secrets.get("ACCESS_CODE", ""):
             st.session_state.authenticated = True
@@ -92,21 +104,24 @@ def check_password():
     st.stop()
 
 
-# ==================== DATA LOADING ==================== #
+# ==================== DATA LOADING ====================
 
 @st.cache_data(show_spinner=False)
-def load_dataframe(path):
+def load_dataframe(path: str) -> pd.DataFrame | None:
+    """Load CSV data with caching. Returns None if file not found."""
     if not os.path.exists(path):
+        logger.error(f"DATA_MISSING | {path}")
         return None
     return pd.read_csv(path)
 
 
-# ==================== ALBERT API HELPERS ==================== #
+# ==================== ALBERT API HELPERS ====================
 
 def _get_api_key() -> str:
     """
-    Retrieve the Albert API key.
-    Priority: st.secrets["ALBERT_API_KEY"]  >  env var ALBERT_API_KEY
+    Retrieve Albert API key with priority:
+    1. st.secrets["ALBERT_API_KEY"]
+    2. Environment variable ALBERT_API_KEY
     """
     key = st.secrets.get("ALBERT_API_KEY", "") or os.environ.get("ALBERT_API_KEY", "")
     if not key:
@@ -119,14 +134,19 @@ def _get_api_key() -> str:
 
 
 def _albert_headers(api_key: str) -> dict:
+    """Build authorization headers for Albert API requests."""
     return {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type":  "application/json",
+        "Content-Type": "application/json",
     }
 
 
 def _list_albert_models(api_key: str) -> list:
-    """Return available text-generation model names from Albert /v1/models."""
+    """
+    Fetch available text-generation models from Albert API.
+    Filters out embedding, audio, and reranking models.
+    Falls back to ALBERT_MODEL_DEFAULT if the API call fails.
+    """
     try:
         r = requests.get(
             f"{ALBERT_BASE_URL}/models",
@@ -135,13 +155,16 @@ def _list_albert_models(api_key: str) -> list:
         )
         r.raise_for_status()
         data = r.json().get("data", [])
-        # Exclude embeddings / audio / reranking models
+        
+        # Filter to text-generation models only
+        excluded_keywords = ("embed", "whisper", "rerank")
         names = [
             m["id"] for m in data
             if m.get("object") == "model"
-            and not any(kw in m["id"].lower() for kw in ("embed", "whisper", "rerank"))
+            and not any(kw in m["id"].lower() for kw in excluded_keywords)
         ]
         return names if names else [ALBERT_MODEL_DEFAULT]
+        
     except Exception as e:
         logger.warning(f"MODEL_LIST_FAIL | {e} — using default model")
         return [ALBERT_MODEL_DEFAULT]
@@ -149,23 +172,27 @@ def _list_albert_models(api_key: str) -> list:
 
 def _parse_tool_arguments(raw_args) -> dict:
     """
-    Albert / vLLM may return tool_call arguments as:
-      - a dict          (ideal case)
-      - a JSON string   (most common case)
-      - a malformed / partial JSON string  (known bug with gpt-oss-120b)
-
-    Returns a dict in all cases.
-    Falls back to {"_raw": raw_args} if everything fails.
+    Parse tool call arguments from Albert API response.
+    
+    Handles multiple formats that Albert/vLLM may return:
+    - dict (ideal case)
+    - JSON string (most common)
+    - Malformed/partial JSON (known gpt-oss-120b bug)
+    
+    Falls back to {"_raw": raw_args} if all parsing fails.
     """
+    # Case 1: Already a dict
     if isinstance(raw_args, dict):
         return raw_args
+    
+    # Case 2: Valid JSON string
     if isinstance(raw_args, str):
-        # Normal case: valid JSON string
         try:
             return json.loads(raw_args)
         except json.JSONDecodeError:
             pass
-        # Fallback: extract key-value pairs with a simple regex
+        
+        # Case 3: Malformed JSON — extract key-value pairs with regex
         recovered = {}
         for m in re.finditer(
             r'"(\w+)"\s*:\s*("(?:[^"\\]|\\.)*"|\d+(?:\.\d+)?|true|false|null)',
@@ -175,11 +202,15 @@ def _parse_tool_arguments(raw_args) -> dict:
                 recovered[m.group(1)] = json.loads(m.group(2))
             except Exception:
                 recovered[m.group(1)] = m.group(2)
+        
         if recovered:
             logger.warning(f"TOOL_ARG_PARTIAL_PARSE | recovered={recovered}")
             return recovered
+        
+        # Case 4: Complete failure
         logger.error(f"TOOL_ARG_PARSE_FAIL | raw={raw_args[:300]}")
         return {"_raw": raw_args}
+    
     return {}
 
 
@@ -188,24 +219,39 @@ def _albert_chat(
     tools: list,
     model: str,
     api_key: str,
-    temperature: float,
-    top_p: float,
-    max_tokens: int = 4096,   # increased: 2048 was causing truncated answers
+    temperature,
+    top_p,
+    presence_penalty=0,
+    frequency_penalty=0,
+    seed=42,
+    max_completion_tokens=4096,
+    parallel_tool_calls=False,
     retry: int = 3,
 ) -> dict:
     """
-    POST to Albert /v1/chat/completions.
-    Retries up to `retry` times on HTTP 429 (rate limit).
+    Send chat completion request to Albert API with retry logic.
+    
+    Retries up to `retry` times on HTTP 429 (rate limiting) with exponential backoff.
     """
     payload = {
-        "model":       model,
-        "messages":    messages,
-        "tools":       tools,
+        "model": model,
+        "messages": messages,
+        "tools": tools,
         "tool_choice": "auto",
+
         "temperature": temperature,
-        "top_p":       top_p,
-        "max_tokens":  max_tokens,
-        "stream":      False,
+        "top_p": top_p,
+
+        "presence_penalty": presence_penalty,
+        "frequency_penalty": frequency_penalty,
+
+        "seed": seed,
+
+        "max_completion_tokens": max_completion_tokens,
+
+        "parallel_tool_calls": parallel_tool_calls,
+
+        "stream": False,
     }
 
     for attempt in range(1, retry + 1):
@@ -216,13 +262,17 @@ def _albert_chat(
                 json=payload,
                 timeout=ALBERT_TIMEOUT,
             )
+            
+            # Handle rate limiting with exponential backoff
             if r.status_code == 429:
                 wait = 2 ** attempt
                 logger.warning(f"RATE_LIMIT | attempt {attempt}/{retry} — waiting {wait}s")
                 time.sleep(wait)
                 continue
+            
             r.raise_for_status()
             return r.json()
+            
         except requests.exceptions.Timeout:
             logger.error(f"ALBERT_TIMEOUT | attempt {attempt}")
             if attempt == retry:
@@ -234,31 +284,42 @@ def _albert_chat(
     raise RuntimeError("Albert API: max retries exceeded")
 
 
-# ==================== ERROR REPORT ==================== #
+# ==================== ERROR REPORTING ====================
 
 def save_error_report(question: str, answer: str, executed_codes: list, comment: str = ""):
+    """
+    Save an error report with context for debugging.
+    
+    Includes:
+    - User's question and model's answer
+    - Executed code snippets
+    - User's comment about what went wrong
+    - Recent log entries for context
+    """
     os.makedirs(REPORT_DIR, exist_ok=True)
-    timestamp  = datetime.now()
-    ts_str     = timestamp.strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now()
+    ts_str = timestamp.strftime("%Y%m%d_%H%M%S")
     report_path = os.path.join(REPORT_DIR, f"report_{ts_str}.json")
 
+    # Collect recent logs for debugging context
     log_filename = os.path.join(LOG_DIR, f"agent_{timestamp.strftime('%Y-%m')}.log")
     related_logs = []
     if os.path.exists(log_filename):
         try:
             with open(log_filename, "r", encoding="utf-8") as f:
-                related_logs = [l.rstrip() for l in f.readlines()[-200:]]
+                related_logs = [line.rstrip() for line in f.readlines()[-200:]]
         except Exception:
             related_logs = ["[Could not read log file]"]
 
     report = {
-        "timestamp":      timestamp.isoformat(),
-        "user_comment":   comment,
-        "question":       question,
-        "answer":         answer,
+        "timestamp": timestamp.isoformat(),
+        "user_comment": comment,
+        "question": question,
+        "answer": answer,
         "executed_codes": executed_codes,
-        "recent_logs":    related_logs,
+        "recent_logs": related_logs,
     }
+    
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
 
@@ -266,22 +327,26 @@ def save_error_report(question: str, answer: str, executed_codes: list, comment:
     return report_path
 
 
-# ==================== SOURCES DISPLAY ==================== #
+# ==================== UI COMPONENTS ====================
 
-def render_sources(wikipedia_urls, pubmed_urls, executed_codes):
+def render_sources(wikipedia_urls: list, pubmed_urls: list, executed_codes: list):
+    """Display expandable sources section with Wikipedia, PubMed, and code references."""
     if not wikipedia_urls and not pubmed_urls and not executed_codes:
         return
+    
     with st.expander("📚 Sources"):
         if wikipedia_urls:
             st.markdown("**📘 Wikipedia**")
             for url in wikipedia_urls:
                 title = url.split("/")[-1].replace("_", " ")
                 st.markdown(f"- [{title}]({url})")
+        
         if pubmed_urls:
             st.markdown("**🔬 PubMed**")
             for url in pubmed_urls:
                 pmid = url.split("/")[-2] if url.endswith("/") else url.split("/")[-1]
                 st.markdown(f"- [PMID: {pmid}]({url})")
+        
         if executed_codes:
             st.markdown("**📊 Dataset Query & Visualization**")
             full_code = "\n\n---\n\n".join(
@@ -290,20 +355,27 @@ def render_sources(wikipedia_urls, pubmed_urls, executed_codes):
             st.code(full_code, language="python")
 
 
-# ==================== ERROR REPORT BUTTON ==================== #
-
 def render_report_button(msg_idx: int, question: str, answer: str, executed_codes: list):
+    """
+    Render an error reporting button with dialog for user feedback.
+    
+    Tracks whether a report has already been submitted for this message
+    to prevent duplicate reports.
+    """
     report_key = f"reported_{msg_idx}"
     dialog_key = f"show_dialog_{msg_idx}"
 
+    # Don't show button if already reported
     if st.session_state.get(report_key):
         st.caption("⚠️ Error reported — thank you for your feedback.")
         return
 
+    # Toggle report dialog
     if st.button("🚩 Report an error", key=f"btn_report_{msg_idx}",
                  help="Signal a wrong or misleading answer"):
         st.session_state[dialog_key] = not st.session_state.get(dialog_key, False)
 
+    # Show report dialog
     if st.session_state.get(dialog_key):
         with st.container(border=True):
             st.markdown("**What went wrong?** *(optional)*")
@@ -312,6 +384,7 @@ def render_report_button(msg_idx: int, question: str, answer: str, executed_code
                 placeholder="e.g. Wrong species name, incorrect count, hallucinated data…",
                 label_visibility="collapsed",
             )
+            
             col1, col2 = st.columns([1, 5])
             with col1:
                 if st.button("Send report", key=f"send_report_{msg_idx}", type="primary"):
@@ -326,190 +399,80 @@ def render_report_button(msg_idx: int, question: str, answer: str, executed_code
                     st.rerun()
 
 
-# ==================== AGENT LOOP ==================== #
+# ==================== AGENT LOOP (Core Logic) ====================
 
 def albert_agent_loop(
     model: str,
     api_key: str,
     user_query: str,
-    df_taxo,
-    df_host,
-    temperature: float      = DEFAULT_TEMPERATURE,
-    top_p: float            = DEFAULT_TOP_P,
-    max_tool_calls: int     = DEFAULT_MAX_TOOL_CALLS,
-    preview_rows: int       = DEFAULT_PREVIEW_ROWS,
-    wikipedia_limit: int    = DEFAULT_WIKIPEDIA_LIMIT,
-    max_tool_content: int   = DEFAULT_MAX_TOOL_CONTENT,
-    status_container        = None,
+    df_taxo: pd.DataFrame,
+    df_host: pd.DataFrame,
+    temperature: float = DEFAULT_TEMPERATURE,
+    top_p: float = DEFAULT_TOP_P,
+    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
+    preview_rows: int = DEFAULT_PREVIEW_ROWS,
+    wikipedia_limit: int = DEFAULT_WIKIPEDIA_LIMIT,
+    max_tool_content: int = DEFAULT_MAX_TOOL_CONTENT,
+    status_container=None,
+    presence_penalty: float = DEFAULT_PRESENCE_PENALTY,
+    frequency_penalty: float = DEFAULT_FREQUENCY_PENALTY,
+    seed: int = DEFAULT_SEED,
+    max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
+    parallel_tool_calls: bool = DEFAULT_PARALLEL_TOOL_CALLS,
 ):
     """
-    Agentic loop using Albert API (OpenAI-compatible /v1/chat/completions).
-
-    Key differences vs original Ollama loop
-    ----------------------------------------
-    | Ollama                        | Albert / OpenAI                        |
-    |-------------------------------|----------------------------------------|
-    | r.json()["message"]           | r.json()["choices"][0]["message"]      |
-    | "tool_calls" key in msg       | finish_reason == "tool_calls"          |
-    | args already a dict           | args is a JSON *string* → json.loads() |
-    | repeat_penalty / seed options | not supported → removed                |
+    Main agentic loop: iteratively calls Albert API with tool-calling capability.
+    
+    The loop continues until:
+    - The model returns a final answer (no tool calls)
+    - Maximum tool call limit is reached
+    - An error occurs
+    
+    Returns:
+        Tuple of (answer_text, figures, sources, wikipedia_urls, pubmed_urls, executed_codes)
     """
-
+    # ── Build system prompt with dataset schema ──────────────────────────────
     df_taxo_columns_str = ", ".join(df_taxo.columns)
     df_host_columns_str = ", ".join(df_host.columns)
 
-    # Build column sample strings (10 non-null values per column)
-    def _col_samples(df, col, n=10):
-        try:
-            vals = df[col].dropna().unique()[:n]
-            return ", ".join(str(v) for v in vals)
-        except Exception:
-            return "N/A"
+    def _col_samples(df, col, n=6):
+        """Get sample values for a column to help the model understand the data."""
+        vals = df[col].dropna().unique()[:n]
+        return ", ".join(str(v) for v in vals)
 
     taxo_samples = {c: _col_samples(df_taxo, c) for c in df_taxo.columns}
     host_samples = {c: _col_samples(df_host, c) for c in df_host.columns}
 
-    taxo_col_detail = "\n".join(
-        f"  - {c}: e.g. {taxo_samples[c]}" for c in df_taxo.columns
-    )
-    host_col_detail = "\n".join(
-        f"  - {c}: e.g. {host_samples[c]}" for c in df_host.columns
-    )
+    taxo_col_detail = "\n".join(f"  - {c}: e.g. {taxo_samples[c]}" for c in df_taxo.columns)
+    host_col_detail = "\n".join(f"  - {c}: e.g. {host_samples[c]}" for c in df_host.columns)
 
-    logger.info("STARTUP | column names loaded — df_taxo: %s | df_host: %s",
-                list(df_taxo.columns), list(df_host.columns))
+    system_prompt = build_system_prompt(taxo_col_detail, host_col_detail)
 
-    system_prompt = f"""
-You are a scientific bioinformatics assistant specialized in virology and viral ecology.
-You have access to two curated datasets and external tools. You must ground every statement in data or tool output.
-
-═══════════════════════════════════════════════
-AVAILABLE DATA
-═══════════════════════════════════════════════
-
-`df_taxo` — Taxonomy database (NCBI/SRA)
-  Columns and example values:
-{taxo_col_detail}
-
-  ★ KEY COLUMN SEMANTICS:
-  - ORGANISM_NAME  → the species/genus/family name (e.g. "Bos taurus", "Homo sapiens")
-  - TAX_ID         → numeric NCBI taxon identifier
-  - RANK           → "species", "genus", "family", etc.
-  - SPECIES_NAME   → often EMPTY — do NOT use this to search for organism names
-
-`df_host` — Virus-host occurrence database (SRA)
-  Columns and example values:
-{host_col_detail}
-
-  ★ KEY COLUMN SEMANTICS:
-  - TAX_ID         → host taxon ID (links to df_taxo.TAX_ID)
-  - VIRAL_TAX_ID   → virus taxon ID (links to df_taxo.TAX_ID for the virus)
-  - VIRAL_SPECIES  → virus name (e.g. "bovine respiratory syncytial virus")
-  - SPECIES_NAME   → often EMPTY — do NOT use to search host names
-  - lon / lat      → coordinates of sampling location
-
-JOIN KEY: df_taxo.TAX_ID ↔ df_host.TAX_ID  (host side)
-
-⚠️ Use ONLY the column names listed above. Always filter with .str.contains() case-insensitive.
-
-CRITICAL — HOST LOOKUP (TWO-STEP MANDATORY):
-df_host.SPECIES_NAME is EMPTY — never search host names there.
-To find viruses infecting a named host (e.g. "Bos taurus", "cat", "human"):
-
-  STEP 1 — Resolve host name → TAX_ID using df_taxo.ORGANISM_NAME:
-    host_rows = df_taxo[df_taxo['ORGANISM_NAME'].str.contains('Bos taurus', case=False, na=False)]
-    host_taxid = int(host_rows['TAX_ID'].iloc[0])
-
-  STEP 2 — Query df_host using the numeric TAX_ID:
-    result = df_host[df_host['TAX_ID'] == host_taxid][['VIRAL_SPECIES', 'VIRAL_TAX_ID']].drop_duplicates()
-
-- ALWAYS use ORGANISM_NAME (not SPECIES_NAME) to search names in df_taxo
-- SPECIES_NAME in df_taxo is almost always empty — ignore it for name lookups
-- If STEP 1 returns 0 rows, try genus only: .str.contains('Bos', case=False)
-- If df_host returns 0 rows for a valid TAX_ID, host has no occurrence records
-- After dataset queries, ALWAYS enrich with wikipedia_search and pubmed_search
-  for comprehensive biological context (taxonomy, pathogenesis, epidemiology)
-
-═══════════════════════════════════════════════
-TOOL SELECTION RULES
-═══════════════════════════════════════════════
-
-1. Geographic / spatial question ("where", "map", "distribution", "location", "detected in")
-   → ALWAYS use `create_map`. Never answer with text coordinates.
-
-2. Chart / graph / plot request ("show", "visualize", "pie chart", "bar chart", "histogram")
-   → Use `create_visualization`.
-   → If the data must be prepared first, call `query_dataframe` before `create_visualization`.
-
-3. Quantitative or tabular question ("how many", "list", "count", "which", "compare")
-   → Use `query_dataframe`.
-
-4. Biological / taxonomic background knowledge not in the datasets
-   → Use `wikipedia_search` or `pubmed_search`.
-
-5. Combine tools when needed.
-
-═══════════════════════════════════════════════
-ACRONYM RESOLUTION & EMPTY RESULT HANDLING
-═══════════════════════════════════════════════
-
-- NEVER search with an acronym directly (HIV, HBV, JSRV, SARS, MPOX, etc.)
-  ALWAYS resolve the acronym first. Call `wikipedia_search` if unsure.
-  Example: HIV → Lentivirus humimdef1 | EBV → Lymphocryptovirus humangamma4
-
-- MANDATORY EMPTY RESULT GUARD:
-  After ANY `query_dataframe` or `create_map` call, check if the result is empty (0 rows).
-  If empty: try broader term, synonyms, partial name with str.contains().
-  Report "no data found" only after at least 2 retry attempts.
-
-═══════════════════════════════════════════════
-DATA INTEGRITY RULES
-═══════════════════════════════════════════════
-
-- NEVER invent species, families, counts, coordinates, or any biological fact.
-- NEVER use column names not listed above. Column names are case-sensitive.
-- NEVER display raw column names or dataset structure in your final response.
-- Always filter with `.str.contains()` (case-insensitive) rather than `==`.
-- ALWAYS include ID in hover_data for map points or plots.
-- Report data EXACTLY as returned — no interpretation, no extrapolation.
-- NEVER fabricate PMIDs, DOIs, author names, journal names, or publication years. Citations must come exclusively from pubmed_search tool output. A fake PMID is worse than no citation.
-- If information is absent from datasets and tools, respond:
-  "This information is not available in the current dataset or sources."
-
-═══════════════════════════════════════════════
-RESPONSE STYLE
-═══════════════════════════════════════════════
-
-- Scientific, concise, neutral tone.
-- Start directly with the answer — no preamble, no "Sure!", no "Great question!".
-- No speculation. No storytelling. No unsolicited context.
-- Answer ONLY what was asked.
-- ANSWER IN MARKDOWN 
-- NEVER include image tags, HTML, or Markdown image syntax in your response.
-- NEVER invent, guess, or extrapolate a PMID. Only cite a PMID if it was explicitly returned by the pubmed_search tool in this conversation. Hallucinated PMIDs are a critical scientific integrity violation. If no pubmed_search was called, do NOT mention any PMID at all.
-"""
-
+    # ── Initialize conversation ──────────────────────────────────────────────
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": user_query},
+        {"role": "user", "content": user_query},
     ]
 
-    used_sources       = set()
+    # Track sources and results for display
     used_wikipedia_urls = []
-    used_pubmed_urls    = []
-    executed_codes      = []
-    generated_figures   = []
-    tool_call_count     = 0
-    query_cache         = {}
-    last_tool_key       = None
-    real_pmids          = set()   # PMIDs confirmed by actual pubmed_search calls
+    used_pubmed_urls = []
+    executed_codes = []
+    generated_figures = []
+    real_pmids = set()  # Confirmed PMIDs from actual pubmed_search calls
+    
+    tool_call_count = 0
+    query_cache = {}  # Avoid redundant dataframe queries
+    last_tool_key = None  # Detect redundant tool calls
 
-    def _sw(icon, label, ok=None):
+    def _update_status(icon, label, ok=None):
+        """Update the status display in the UI."""
         if status_container is None:
             return
         prefix = {None: "⏳", True: "✅", False: "❌"}[ok]
         status_container.write(f"{prefix} {icon} {label}{'…' if ok is None else ''}")
 
+    # ── Logging ──────────────────────────────────────────────────────────────
     logger.info("=" * 50)
     logger.info(f"USER_QUERY | {user_query}")
     logger.info(
@@ -518,14 +481,16 @@ RESPONSE STYLE
         f"max_tool_content={max_tool_content}"
     )
 
-    _sw("🧠", "Thinking")
+    _update_status("🧠", "Thinking")
 
+    # ── Main agent loop ──────────────────────────────────────────────────────
     while True:
-        # ── Call Albert API ──────────────────────────────────────────────────
         logger.info(
             f"LLM_CALL | sending {len(messages)} messages | "
             f"roles={[m['role'] for m in messages]}"
         )
+        
+        # Call Albert API
         try:
             resp = _albert_chat(
                 messages=messages,
@@ -534,38 +499,41 @@ RESPONSE STYLE
                 api_key=api_key,
                 temperature=temperature,
                 top_p=top_p,
+                presence_penalty=presence_penalty,      # Ajouté
+                frequency_penalty=frequency_penalty,    # Ajouté
+                seed=seed,                              # Ajouté
+                max_completion_tokens=max_completion_tokens,  # Ajouté
+                parallel_tool_calls=parallel_tool_calls,      # Ajouté
             )
         except requests.exceptions.Timeout:
             logger.error("ALBERT_TIMEOUT")
             return (
                 "The model took too long to respond (>180 s). Please try again.",
-                generated_figures, used_sources,
-                used_wikipedia_urls, used_pubmed_urls, executed_codes,
+                generated_figures, set(), [], [], executed_codes,
             )
         except Exception as e:
             logger.error(f"ALBERT_ERROR | {e}")
             return (
                 f"Could not reach Albert API: {e}",
-                generated_figures, used_sources,
-                used_wikipedia_urls, used_pubmed_urls, executed_codes,
+                generated_figures, set(), [], [], executed_codes,
             )
 
-        # ── Parse OpenAI-format response ─────────────────────────────────────
-        choice      = resp["choices"][0]
-        msg         = choice["message"]
-        finish      = choice.get("finish_reason", "")
+        # Parse response
+        choice = resp["choices"][0]
+        msg = choice["message"]
+        finish = choice.get("finish_reason", "")
 
-        logger.info(f"LLM_RESPONSE | finish_reason={finish!r} | "
-                    f"has_tool_calls={bool(msg.get('tool_calls'))} | "
-                    f"content_len={len(msg.get('content') or '')}")
-        logger.debug(f"LLM_RAW_MSG | {json.dumps(msg, ensure_ascii=False)[:1000]}")
+        logger.info(
+            f"LLM_RESPONSE | finish_reason={finish!r} | "
+            f"has_tool_calls={bool(msg.get('tool_calls'))} | "
+            f"content_len={len(msg.get('content') or '')}"
+        )
 
-        # ── No tool calls → candidate final answer ───────────────────────────
+        # ── CASE 1: Final answer (no tool calls) ─────────────────────────────
         if finish != "tool_calls" or not msg.get("tool_calls"):
             final_text = (msg.get("content") or "").strip()
 
-            # ⚠️  gpt-oss-120b bug: early stop with no content and few tool calls
-            # — push the model to continue searching before declaring done
+            # Handle gpt-oss-120b bug: early stop with no content
             if not final_text and tool_call_count < 3 and tool_call_count > 0:
                 logger.warning(
                     f"EARLY_STOP | finish=stop, content empty, only {tool_call_count} tool calls — "
@@ -581,19 +549,16 @@ RESPONSE STYLE
                         f"then provide a complete scientific answer."
                     ),
                 })
-                continue  # re-enter the loop
+                continue
 
-            # ⚠️  gpt-oss-120b bug: returns finish_reason="stop" with empty content
-            #    after tool calls. The model cannot synthesize inside a conversation
-            #    that contains tool_call messages in its history.
-            #    Fix: rebuild a CLEAN conversation with tool results as plain text context.
+            # Handle empty answer after tool calls (model synthesis workaround)
             if not final_text and tool_call_count > 0:
                 logger.warning(
                     "EMPTY_FINAL_ANSWER | content blank after tool calls — "
                     "rebuilding clean context for synthesis (gpt-oss-120b workaround)"
                 )
 
-                # Collect all tool results from history (role == "tool")
+                # Collect all tool results from conversation history
                 tool_results_text = []
                 for m in messages:
                     if m.get("role") == "tool":
@@ -603,30 +568,25 @@ RESPONSE STYLE
                         )
 
                 context_block = "\n\n".join(tool_results_text)
-                logger.info(
-                    f"SYNTHESIS_CONTEXT | {len(tool_results_text)} tool results | "
-                    f"total_chars={len(context_block)}"
+                
+                # Evaluate context quality
+                error_count = sum(
+                    1 for r in tool_results_text 
+                    if r.startswith("=== Result") and "Error:" in r
                 )
-
-                # Evaluate context quality: if most results are errors, say so clearly
-                error_count = sum(1 for r in tool_results_text if r.startswith("=== Result") and "Error:" in r)
                 success_count = len(tool_results_text) - error_count
-                logger.info(f"SYNTHESIS_QUALITY | success={success_count} error={error_count} total={len(tool_results_text)}")
 
                 if success_count == 0 and error_count > 0:
-                    # All tool results are errors — context is useless for synthesis
-                    # Fall back to pure knowledge answer
-                    logger.warning("SYNTHESIS_FALLBACK | all tool results are errors — using model knowledge only")
+                    # All searches failed — use model knowledge only
+                    logger.warning("SYNTHESIS_FALLBACK | all tool results are errors")
                     context_note = (
-                        f"Note: the dataset did not contain data for this query "
-                        f"(search returned no results). Answer from scientific knowledge only."
+                        "Note: the dataset did not contain data for this query "
+                        "(search returned no results). Answer from scientific knowledge only."
                     )
                 else:
-                    context_note = (
-                        f"Here is all the information gathered:\n\n{context_block}"
-                    )
+                    context_note = f"Here is all the information gathered:\n\n{context_block}"
 
-                # Fresh conversation — NO tool_call messages, NO tools parameter
+                # Build fresh conversation for synthesis (no tool messages)
                 clean_messages = [
                     {"role": "system", "content": system_prompt},
                     {
@@ -652,22 +612,24 @@ RESPONSE STYLE
                 try:
                     retry_resp = _albert_chat(
                         messages=clean_messages,
-                        tools=[],        # no tools — force plain text answer
+                        tools=[],  # Force plain text answer
                         model=model,
                         api_key=api_key,
                         temperature=temperature,
                         top_p=top_p,
-                        max_tokens=6144, # synthesis needs more tokens than tool calls
+                        max_completion_tokens=6144,
                     )
                     final_text = (
                         retry_resp["choices"][0]["message"].get("content") or ""
                     ).strip()
-                    # Strip hallucinated PMIDs from synthesis output
+                    
+                    # Remove hallucinated PMIDs
                     final_text, stripped = _strip_hallucinated_pmids(final_text, real_pmids)
                     if stripped:
                         logger.warning(
                             f"PMID_HALLUCINATION_SYNTHESIS | stripped {len(stripped)} fake PMID(s): {stripped}"
                         )
+                    
                     logger.info(f"SYNTHESIS_OK | content_len={len(final_text)}")
                     if not final_text:
                         logger.error("SYNTHESIS_FAIL | still empty after clean context")
@@ -677,12 +639,9 @@ RESPONSE STYLE
                         )
                 except Exception as e:
                     logger.error(f"SYNTHESIS_RETRY_FAIL | {e}")
-                    final_text = (
-                        "The model did not produce a final answer. "
-                        "Please rephrase your question."
-                    )
+                    final_text = "The model did not produce a final answer. Please rephrase your question."
 
-            # ── PMID hallucination guard ─────────────────────────────────────
+            # Final PMID check before returning
             final_text, stripped = _strip_hallucinated_pmids(final_text, real_pmids)
             if stripped:
                 logger.warning(
@@ -694,16 +653,19 @@ RESPONSE STYLE
                 f"{final_text[:500]}{'...' if len(final_text) > 500 else ''}"
             )
             messages.append(msg)
+            
             return (
                 final_text,
-                generated_figures, used_sources,
-                used_wikipedia_urls, used_pubmed_urls, executed_codes,
+                generated_figures,
+                used_wikipedia_urls,
+                used_pubmed_urls,
+                executed_codes,
             )
 
-        # Append assistant message (with tool_calls) to conversation history
+        # ── CASE 2: Tool calls ───────────────────────────────────────────────
         messages.append(msg)
 
-        # ── Tool call limit guard ────────────────────────────────────────────
+        # Check tool call limit
         if tool_call_count >= max_tool_calls:
             logger.warning(f"MAX_TOOL_CALLS | Limit reached ({max_tool_calls})")
             messages.append({
@@ -715,44 +677,40 @@ RESPONSE STYLE
             })
             continue
 
-        # ── Execute each tool call ───────────────────────────────────────────
+        # Execute each tool call
         for call in msg["tool_calls"]:
             tool_call_count += 1
-            name     = call["function"]["name"]
+            name = call["function"]["name"]
             raw_args = call["function"].get("arguments", {})
-            # ⚠️  Albert/vLLM returns arguments as a JSON *string* — must parse
-            args     = _parse_tool_arguments(raw_args)
+            args = _parse_tool_arguments(raw_args)
 
             logger.info(
                 f"TOOL_CALL #{tool_call_count}/{max_tool_calls} | {name} | "
                 f"call_id={call.get('id','?')} | "
-                f"raw_args_type={type(raw_args).__name__} | "
                 f"parsed_args={json.dumps(args, ensure_ascii=False)[:400]}"
             )
 
-            # Redundancy detection — skip and return a memo to the model
+            # ── Redundancy detection ─────────────────────────────────────────
             tool_key = (name, json.dumps(args, sort_keys=True))
             if tool_key == last_tool_key:
-                logger.warning(
-                    f"TOOL_REDUNDANT | {name} identical args as previous call — skipping"
-                )
+                logger.warning(f"TOOL_REDUNDANT | {name} identical args as previous call — skipping")
                 messages.append({
-                    "role":         "tool",
+                    "role": "tool",
                     "tool_call_id": call["id"],
-                    "name":         name,
-                    "content":      "This exact tool call was already executed. Use the previous result.",
+                    "name": name,
+                    "content": "This exact tool call was already executed. Use the previous result.",
                 })
                 continue
             last_tool_key = tool_key
 
             icon, label = TOOL_LABELS.get(name, ("🔧", name))
-            _sw(icon, label)
+            _update_status(icon, label)
 
-            # ── Dispatch ─────────────────────────────────────────────────────
+            # ── Tool Dispatch ────────────────────────────────────────────────
             if name == "wikipedia_search":
                 output = wikipedia_search(**args, wikipedia_limit=wikipedia_limit)
+                
                 if output["success"]:
-                    used_sources.add("Wikipedia")
                     used_wikipedia_urls.append(output["url"])
                     fuzzy_note = (
                         f"\n\n> ⚠️ No exact page found for *{output['original_search']}*"
@@ -764,26 +722,28 @@ RESPONSE STYLE
                         f"{fuzzy_note}\n\n🔗 {output['url']}"
                     )
                     logger.info(f"TOOL_OK | wikipedia_search | url={output['url']}")
-                    _sw(icon, label, ok=True)
+                    _update_status(icon, label, ok=True)
                 else:
                     content = output["message"]
                     logger.warning(f"TOOL_FAIL | wikipedia_search | {output['message']}")
-                    _sw(icon, label, ok=False)
+                    _update_status(icon, label, ok=False)
 
             elif name == "pubmed_search":
                 output = pubmed_search(**args)
+                
                 if output["success"]:
-                    used_sources.add("PubMed")
                     parts = [f"Found {output['count']} relevant articles on PubMed:\n"]
                     for i, article in enumerate(output["articles"], 1):
                         used_pubmed_urls.append(article["url"])
                         if article.get("pmid"):
-                            real_pmids.add(str(article["pmid"]))  # track confirmed PMIDs
+                            real_pmids.add(str(article["pmid"]))  # Track for hallucination guard
+                        
                         authors_str = (
                             ", ".join(article["authors"])
                             if article["authors"] else "Unknown authors"
                         )
                         doi_str = f"DOI: {article['doi']}" if article["doi"] else ""
+                        
                         parts.append(
                             f"\n--- Article {i} ---\n"
                             f"**{article['title']}**\n"
@@ -795,15 +755,17 @@ RESPONSE STYLE
                         )
                     content = "\n".join(parts)
                     logger.info(f"TOOL_OK | pubmed_search | {output['count']} articles")
-                    _sw(icon, label, ok=True)
+                    _update_status(icon, label, ok=True)
                 else:
                     content = output["message"]
                     logger.warning(f"TOOL_FAIL | pubmed_search | {output['message']}")
-                    _sw(icon, label, ok=False)
+                    _update_status(icon, label, ok=False)
 
             elif name == "query_dataframe":
-                code      = args.get("code", args.get("_raw", ""))
+                code = args.get("code", args.get("_raw", ""))
                 cache_key = hash(code)
+                
+                # Use cached result if available
                 if cache_key in query_cache:
                     logger.warning("TOOL_REDUNDANT_QUERY | reusing cached result")
                     output = query_cache[cache_key]
@@ -813,17 +775,16 @@ RESPONSE STYLE
 
                 if output["success"]:
                     executed_codes.append(code)
-                    used_sources.add("Dataset query")
                     content = (
                         f"Query OK. Shape: {output['shape']}\n"
                         f"Columns: {', '.join(output['columns'])}\n"
                         f"{output['preview']}"
                     )
                     logger.info(f"TOOL_OK | query_dataframe | shape={output['shape']}")
-                    _sw(icon, label, ok=True)
+                    _update_status(icon, label, ok=True)
                 else:
                     err_msg = output["message"]
-                    # Detect host-name-in-df_host mistake and give targeted hint
+                    # Detect common mistake: querying host name in df_host instead of using TAX_ID
                     host_hint = ""
                     if "0 rows" in err_msg and (
                         "df_host" in code and "str.contains" in code
@@ -836,55 +797,49 @@ RESPONSE STYLE
                             ".str.contains('NAME', case=False)]['TAX_ID'].iloc[0]\n"
                             "  2. result = df_host[df_host['<TAX_ID_COL>'] == host_taxid]"
                         )
-                        logger.warning("TOOL_HINT | Detected host-name-in-df_host mistake — hint sent to model")
+                        logger.warning("TOOL_HINT | Detected host-name-in-df_host mistake")
                     content = f"Error:\n{err_msg}{host_hint}"
                     logger.warning(f"TOOL_FAIL | query_dataframe | {err_msg}")
-                    _sw(icon, label, ok=False)
+                    _update_status(icon, label, ok=False)
 
             elif name == "create_map":
-                code   = args.get("code", args.get("_raw", ""))
+                code = args.get("code", args.get("_raw", ""))
                 output = create_map(code, df_taxo, df_host)
+                
                 if output["success"]:
                     executed_codes.append(code)
-                    used_sources.add("Dataset map")
                     generated_figures.append(output["figure"])
                     content = "Map created successfully."
                     if "num_points" in output:
                         content = f"Map created successfully with {output['num_points']} points."
                     logger.info("TOOL_OK | create_map")
-                    _sw(icon, label, ok=True)
+                    _update_status(icon, label, ok=True)
                 else:
                     content = f"Error:\n{output['message']}"
                     logger.warning(f"TOOL_FAIL | create_map | {output['message']}")
-                    _sw(icon, label, ok=False)
+                    _update_status(icon, label, ok=False)
 
             elif name == "create_visualization":
-                code   = args.get("code", args.get("_raw", ""))
+                code = args.get("code", args.get("_raw", ""))
                 output = create_visualization(code, df_taxo, df_host)
+                
                 if output["success"]:
                     executed_codes.append(code)
-                    used_sources.add("Dataset visualization")
                     generated_figures.append(output["figure"])
                     content = "Visualization created successfully."
                     logger.info("TOOL_OK | create_visualization")
-                    _sw(icon, label, ok=True)
+                    _update_status(icon, label, ok=True)
                 else:
                     content = f"Error:\n{output['message']}"
                     logger.warning(f"TOOL_FAIL | create_visualization | {output['message']}")
-                    _sw(icon, label, ok=False)
+                    _update_status(icon, label, ok=False)
 
             else:
                 content = f"Unknown tool: {name}"
                 logger.error(f"UNKNOWN_TOOL | {name}")
-                _sw("🔧", name, ok=False)
+                _update_status("🔧", name, ok=False)
 
-            # Log tool result preview (before truncation)
-            logger.info(
-                f"TOOL_RESULT | {name} | total_chars={len(content)} | "
-                f"preview={repr(content[:300].replace(chr(10), ' '))}"
-            )
-
-            # Truncate oversized tool output before sending back to the model
+            # ── Truncate oversized tool output ───────────────────────────────
             if len(content) > max_tool_content:
                 original_len = len(content)
                 content = (
@@ -896,15 +851,15 @@ RESPONSE STYLE
                     f"trimmed from {original_len} to {max_tool_content} chars"
                 )
 
-            # Append tool result in OpenAI format
+            # Append tool result to conversation
             messages.append({
-                "role":         "tool",
+                "role": "tool",
                 "tool_call_id": call["id"],
-                "name":         name,
-                "content":      content,
+                "name": name,
+                "content": content,
             })
 
-        # ── Log conversation state at end of each agentic turn ───────────────
+        # Log loop state at end of each iteration
         logger.info(
             f"LOOP_STATE | messages_in_history={len(messages)} | "
             f"tool_calls_used={tool_call_count}/{max_tool_calls} | "
@@ -912,18 +867,21 @@ RESPONSE STYLE
         )
 
 
-# ==================== MAIN ==================== #
+# ==================== MAIN APPLICATION ====================
 
 def main():
+    """Main Streamlit application entry point."""
     st.set_page_config(page_icon="🦠", layout="wide")
 
+    # Password protection (if enabled in secrets)
     if st.secrets.get("PASSWORD_ENABLED", False):
         check_password()
 
-    # Retrieve API key once (st.stop() if missing)
+    # Retrieve API key (will stop if not found)
     api_key = _get_api_key()
 
-    st.title("Welcome :) ")
+    # ── Page header ──────────────────────────────────────────────────────────
+    st.title("ViromeChat-AI 🦠")
     st.markdown(
         """
         <style>
@@ -951,7 +909,7 @@ def main():
         - "Tell me more about Polyomavirus infection way"
     """)
 
-    # ── Sidebar ───────────────────────────────────────────────────────────────
+    # ── Sidebar ──────────────────────────────────────────────────────────────
     with st.sidebar:
         st.title("ViromeChat-AI 🦠")
         st.caption("""
@@ -961,9 +919,7 @@ Ask about:
 - Taxonomy information: families, genera, species
 - Virus-host relationships and geographic distribution
 - Interactive maps and charts
-- Additional information via PubMed abstracts
-
-Databases available:
+- Additional information via PubMed abstractsDatabases available:
 - Taxonomy — NCBI/SRA
 - Virus-host occurrences — SRA
 - Wikipedia, PubMed (via search tool)
@@ -978,10 +934,11 @@ Databases available:
             st.error("Required dataset not found")
             st.stop()
 
-        # Fetch available models from Albert
+        # Fetch available models from Albert API
         with st.spinner("Loading models…"):
             model_names = _list_albert_models(api_key)
 
+        # Expert configuration panel
         with st.expander("⚙️ Expert mode", expanded=False):
             default_idx = next(
                 (i for i, m in enumerate(model_names)
@@ -994,30 +951,84 @@ Databases available:
             )
 
             st.markdown("**Sampling**")
-            temperature = st.slider("Temperature", 0.0, 2.0, DEFAULT_TEMPERATURE, 0.05)
-            top_p       = st.slider("Top-p",       0.0, 1.0, DEFAULT_TOP_P,       0.05)
+
+            temperature = st.slider(
+                "Temperature",
+                0.0, 2.0,
+                DEFAULT_TEMPERATURE,
+                0.05
+            )
+
+            top_p = st.slider(
+                "Top-p",
+                0.0, 1.0,
+                DEFAULT_TOP_P,
+                0.05
+            )
+
+            presence_penalty = st.slider(
+                "Presence penalty",
+                -2.0, 2.0,
+                DEFAULT_PRESENCE_PENALTY,
+                0.1,
+                help="Encourage le modèle à explorer de nouveaux sujets."
+            )
+
+            frequency_penalty = st.slider(
+                "Frequency penalty",
+                -2.0, 2.0,
+                DEFAULT_FREQUENCY_PENALTY,
+                0.1,
+                help="Réduit les répétitions."
+            )
+
+            seed = st.number_input(
+                "Seed",
+                value=DEFAULT_SEED,
+                step=1
+            )
+
+            max_completion_tokens = st.number_input(
+                "Max completion tokens",
+                min_value=512,
+                max_value=32768,
+                value=DEFAULT_MAX_COMPLETION_TOKENS,
+                step=512
+            )
+
+            parallel_tool_calls = st.checkbox(
+                "Parallel tool calls",
+                value=DEFAULT_PARALLEL_TOOL_CALLS
+            )
 
             st.markdown("**Agent**")
-            max_tool_calls   = st.slider("Max tool calls",         1,    20,    DEFAULT_MAX_TOOL_CALLS,
-                                          help="Increase for complex multi-step questions")
-            preview_rows     = st.slider("Preview rows",           5,    200,   DEFAULT_PREVIEW_ROWS, 5)
-            wikipedia_limit  = st.slider("Wiki limit (chars/article)", 500, 30000, DEFAULT_WIKIPEDIA_LIMIT, 500)
-            max_tool_content = st.slider("Max tool content (chars)",2000, 30000, DEFAULT_MAX_TOOL_CONTENT, 1000)
+            max_tool_calls = st.slider(
+                "Max tool calls", 1, 20, DEFAULT_MAX_TOOL_CALLS,
+                help="Increase for complex multi-step questions"
+            )
+            preview_rows = st.slider("Preview rows", 5, 200, DEFAULT_PREVIEW_ROWS, 5)
+            wikipedia_limit = st.slider(
+                "Wiki limit (chars/article)", 500, 30000, DEFAULT_WIKIPEDIA_LIMIT, 500
+            )
+            max_tool_content = st.slider(
+                "Max tool content (chars)", 2000, 30000, DEFAULT_MAX_TOOL_CONTENT, 1000
+            )
 
         st.markdown("---")
         st.caption(f"🔗 GitHub: {GITHUB_URL}")
 
-    # ── Session state ─────────────────────────────────────────────────────────
+    # ── Initialize chat history ──────────────────────────────────────────────
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # ── Chat history display ──────────────────────────────────────────────────
+    # ── Display chat history ─────────────────────────────────────────────────
     for msg_idx, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             if not msg.get("content"):
                 continue
             st.markdown(msg["content"])
 
+            # Display any generated figures
             for fig_idx, fig in enumerate(msg.get("figures", [])):
                 st.plotly_chart(
                     fig,
@@ -1025,12 +1036,14 @@ Databases available:
                     config={"displayModeBar": True, "scrollZoom": True},
                 )
 
+            # Display sources used
             render_sources(
                 msg.get("wikipedia_urls", []),
                 msg.get("pubmed_urls", []),
                 msg.get("executed_codes", []),
             )
 
+            # Error reporting for assistant messages
             if msg["role"] == "assistant":
                 question = ""
                 if msg_idx > 0 and st.session_state.messages[msg_idx - 1]["role"] == "user":
@@ -1042,36 +1055,44 @@ Databases available:
                     executed_codes=msg.get("executed_codes", []),
                 )
 
-    # ── Chat input ────────────────────────────────────────────────────────────
+    # ── Chat input ───────────────────────────────────────────────────────────
     if query := st.chat_input("Ask about viruses..."):
+        # Add user message
         st.session_state.messages.append({"role": "user", "content": query})
         with st.chat_message("user"):
             st.markdown(query)
 
+        # Generate assistant response
         with st.chat_message("assistant"):
             status_placeholder = st.empty()
-            status_container   = status_placeholder.status("Processing…", expanded=True)
+            status_container = status_placeholder.status("Processing…", expanded=True)
 
-            answer, figures, used_sources, wikipedia_urls, pubmed_urls, executed_codes = (
+            answer, figures, wikipedia_urls, pubmed_urls, executed_codes = (
                 albert_agent_loop(
-                    model            = model,
-                    api_key          = api_key,
-                    user_query       = query,
-                    df_taxo          = df_taxo,
-                    df_host          = df_host,
-                    temperature      = temperature,
-                    top_p            = top_p,
-                    max_tool_calls   = max_tool_calls,
-                    preview_rows     = preview_rows,
-                    wikipedia_limit  = wikipedia_limit,
-                    max_tool_content = max_tool_content,
-                    status_container = status_container,
+                    model=model,
+                    api_key=api_key,
+                    user_query=query,
+                    df_taxo=df_taxo,
+                    df_host=df_host,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tool_calls=max_tool_calls,
+                    preview_rows=preview_rows,
+                    wikipedia_limit=wikipedia_limit,
+                    max_tool_content=max_tool_content,
+                    status_container=status_container,
+                    presence_penalty=presence_penalty,
+                    frequency_penalty=frequency_penalty,
+                    seed=seed,
+                    max_completion_tokens=max_completion_tokens,
+                    parallel_tool_calls=parallel_tool_calls,
                 )
             )
 
             status_placeholder.empty()
             st.markdown(answer)
 
+            # Display generated figures
             new_msg_idx = len(st.session_state.messages)
             for fig_idx, fig in enumerate(figures):
                 st.plotly_chart(
@@ -1080,23 +1101,26 @@ Databases available:
                     config={"displayModeBar": True, "scrollZoom": True},
                 )
 
+            # Display sources and error reporting
             render_sources(wikipedia_urls, pubmed_urls, executed_codes)
             render_report_button(
-                msg_idx       = new_msg_idx,
-                question      = query,
-                answer        = answer,
-                executed_codes= executed_codes,
+                msg_idx=new_msg_idx,
+                question=query,
+                answer=answer,
+                executed_codes=executed_codes,
             )
 
+        # Save assistant message to history
         st.session_state.messages.append({
-            "role":           "assistant",
-            "content":        answer,
-            "figures":        figures,
+            "role": "assistant",
+            "content": answer,
+            "figures": figures,
             "wikipedia_urls": wikipedia_urls,
-            "pubmed_urls":    pubmed_urls,
+            "pubmed_urls": pubmed_urls,
             "executed_codes": executed_codes,
         })
 
+    # ── Footer disclaimer ────────────────────────────────────────────────────
     st.markdown("---")
     st.caption(
         "⚠️ **AI is not magic** — Results may contain errors and "
