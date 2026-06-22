@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """
-ViromeChat-AI: A conversational interface for exploring viral metagenomic data.
+Viromech@t: A conversational interface for exploring viral metagenomic data.
 Uses Albert API (OpenAI-compatible) with tool-calling capabilities for:
 - Dataset queries (taxonomy and host databases)
 - Wikipedia and PubMed searches
@@ -881,7 +881,7 @@ def main():
     api_key = _get_api_key()
 
     # ── Page header ──────────────────────────────────────────────────────────
-    st.title("ViromeChat-AI 🦠")
+    st.title("Welcome to Viromech@t")
     st.markdown(
         """
         <style>
@@ -911,9 +911,9 @@ def main():
 
     # ── Sidebar ──────────────────────────────────────────────────────────────
     with st.sidebar:
-        st.title("ViromeChat-AI 🦠")
+        st.title("Viromech@t🦠")
         st.caption("""
-A conversational interface to explore viral metagenomic data in the Virome@tlas project.
+A chatbot to explore viral metagenomic data in the Virome@tlas project.
 
 Ask about:
 - Taxonomy information: families, genera, species
