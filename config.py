@@ -1,24 +1,56 @@
 """
 config.py — Centralized configuration for the Virus Dataset AI Agent.
 Import in any module with: from config import *  or  from config import TAXO_DB_PATH, ...
+
+Secrets/credentials are NOT stored here — they live in two separate,
+gitignored .env files, one per process:
+  - .env.app  (loaded by app.py)         → ALBERT_API_KEY, PASSWORD_ENABLED, ACCESS_CODE
+  - .env.mcp  (loaded by server_mcp.py)  → S3 credentials (ENDPOINT, ACCESS_KEY, ...)
+See .env.app.example / .env.mcp.example for the expected keys.
 """
+
+import os
 
 # ==================== PATHS ==================== #
 TAXO_DB_PATH = "data/TAXONOMY.csv"
 HOST_DB_PATH = "data/viral_host_clean_llm.csv"
 LOG_DIR      = "logs"
 
+APP_ENV_PATH = ".env.app"
+MCP_ENV_PATH = ".env.mcp"
+
+
+def load_env_file(env_path: str) -> None:
+    """
+    Load KEY=VALUE pairs from a .env-style file into os.environ, without
+    overriding variables already set in the real environment (so a real
+    deployment's env vars always win over a local .env file).
+    """
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value.strip()
+
 # ── Albert API Configuration ──────────────────────────────────────────────────
 ALBERT_BASE_URL      = "https://albert.api.etalab.gouv.fr/v1"
-ALBERT_TIMEOUT       = 180          # seconds — large models can be slow
+ALBERT_TIMEOUT       = 120          # seconds — large models can be slow
 ALBERT_MODEL_DEFAULT = "AgentPublic/gptoss120b"  # fallback if model list fails
+ALBERT_WHISPER_MODEL = "openai/whisper-large-v3"  # speech-to-text for the mic input
 
 # ==================== APP ==================== #
 PAGE_TITLE   = "Virus Dataset AI Agent 🦠"
 PAGE_ICON    = "🦠"
 GITHUB_URL   = "https://github.com/Romumrn/chat-virus-AI"
 
-# ==================== AGENT DEFAULTS ==================== #
+MCP_SERVER_URL = "http://localhost:8000/mcp"
+
 # ==================== AGENT DEFAULTS ==================== #
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_TOP_P = 0.9

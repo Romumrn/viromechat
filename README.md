@@ -1,194 +1,202 @@
-# 🦠 Virus Dataset AI Agent
+# 🦠 Viromech@t — Virus Dataset AI Agent
+
+A conversational agent for exploring viral taxonomy and virus–host data, built on a strict
+tool-calling architecture: the LLM never sees raw data directly, it can only act through a
+small set of audited tools exposed by a separate [MCP server](README_MCP.md).
 
 ## Project Context
 
-This project is developed within the framework of **SHAPE-Med@Lyon** and contributes to the structuring research initiative [**Virome@tlas**](https://www.shape-med-lyon.fr/projets/structurants-vague-1/virometlas/).
+This project is developed within the framework of **SHAPE-Med@Lyon** and contributes to the
+structuring research initiative [**Virome@tlas**](https://www.shape-med-lyon.fr/projets/structurants-vague-1/virometlas/).
 
-*Virome@tlas* aims to build an integrated digital platform for large-scale exploration and surveillance of the global virosphere. The project leverages publicly available sequencing data to analyze virus diversity, virus–host interactions, and ecological distribution patterns within a transdisciplinary **One Health** framework spanning human, animal, and environmental health.
+*Virome@tlas* aims to build an integrated digital platform for large-scale exploration and
+surveillance of the global virosphere, leveraging publicly available sequencing data to analyze
+virus diversity, virus–host interactions, and ecological distribution patterns within a
+transdisciplinary **One Health** framework spanning human, animal, and environmental health.
 
-The Virus Dataset AI Agent supports this effort by providing a controlled, reproducible interface for structured exploration of viral taxonomy and virus–host datasets. It is designed as a research companion tool that combines:
-
-* Deterministic dataset querying
-* Transparent visualization generation
-* Controlled external knowledge retrieval
-* Strict grounding of all biological statements
-
-By constraining the language model to explicit data sources and documented tool calls, the system aims to reduce hallucination risk while preserving interpretability and scientific traceability.
+Viromech@t supports this effort as a research companion tool combining deterministic dataset
+querying, transparent visualization, controlled external knowledge retrieval, and strict
+grounding of every biological statement in tool output.
 
 ---
 
-## Data Sources
+## Architecture
 
-The system operates on structured viral datasets:
+The system is split into **two independent processes** that only talk to each other over MCP/HTTP:
 
 ```
-data/
-├── viral_taxo.csv        # Viral taxonomy (NCBI/SRA)
-└── virushostdb.tsv       # Virus–host occurrences (SRA)
+┌─────────────────────┐   MCP over HTTP    ┌───────────────────────────┐
+│   app.py             │ ─────────────────► │   server_mcp.py            │
+│   Streamlit client   │ ◄───────────────── │   FastMCP server            │
+│   (chat UI, Albert   │   tools + resources │   (owns all data access:   │
+│    API tool-calling) │                     │   taxonomy CSV + S3 host  │
+└─────────────────────┘                     │   Parquet via DuckDB)     │
+                                             └───────────────────────────┘
 ```
 
-### Viral Taxonomy Dataset (`viral_taxo.csv`)
+* **`app.py`** never touches a dataframe or a credential for the S3 bucket. It lists the tools
+  the MCP server currently exposes, forwards them to the [Albert API](https://albert.api.etalab.gouv.fr)
+  (French government sovereign LLM infrastructure, OpenAI-compatible) for tool-calling, and
+  dispatches each call back to the MCP server. It is deliberately generic: it reads a tool's
+  JSON schema to decide which UI-configured defaults apply, rather than hardcoding tool names.
+* **`server_mcp.py`** owns the datasets, the DuckDB/S3 connection, and every tool's business
+  logic and guardrails. See **[README_MCP.md](README_MCP.md)** for the full tool/resource
+  reference.
 
-* Taxonomic hierarchy (species, genus, family, order, etc.)
-* Associated genomic and ecological metadata
-* Derived from SRA taxonomy records
-* Key columns: `TAX_ID`, `ORGANISM_NAME`, `RANK`, `GENUS_NAME`, `FAMILY_NAME`, `DIVISION_NAME`
-
-### Virus–Host Dataset (`virushostdb.tsv`)
-
-* Virus–host occurrence records with geographic coordinates
-* Derived from VirusHostDB ([genome.jp](https://www.genome.jp/virushostdb/)) and SRA
-* Key columns: `DATA_ID`, `VIRAL_TAX_ID`, `VIRAL_SPECIES`, `TAX_ID` (host), `lon`, `lat`
-* Host names are resolved via `TAX_ID` join with `viral_taxo.csv` — the `SPECIES_NAME` column is intentionally sparse
-
-All quantitative results originate strictly from these datasets.
+Both processes read their own, separate secrets file — see [Configuration](#configuration).
 
 ---
 
-## Agent Architecture
+## Features
 
-The agent uses a controlled tool-calling loop powered by the **Albert API** (French government sovereign AI infrastructure), using the `gpt-oss-120b` model via an OpenAI-compatible endpoint.
-
-### Tools
-
-#### `query_dataframe`
-
-Executes validated pandas code on the dataset.
-
-* Returns structured DataFrame output
-* Restricts access to known columns
-* Enforces assignment to a `result` variable
-* Result cache prevents redundant identical calls
-
-#### `create_visualization`
-
-Generates interactive Plotly figures.
-
-* Requires explicit `fig` assignment
-* Produces deterministic visual outputs
-
-#### `create_map`
-
-Generates geographic Plotly maps from occurrence coordinates.
-
-* Triggered automatically for spatial/distribution questions
-* Uses `lon`/`lat` columns from the virus–host dataset
-
-#### `wikipedia_search`
-
-Retrieves biological summaries from Wikipedia.
-
-* Plain-text extraction only
-* Character-limited responses (configurable)
-* Explicit source URLs returned
-* Fuzzy matching for approximate name resolution
-
-#### `pubmed_search`
-
-Retrieves scientific article abstracts from PubMed.
-
-* Returns title, authors, journal, year, abstract, DOI, PMID
-* Only confirmed PMIDs from actual tool calls are allowed in responses
-* Hallucinated PMIDs are automatically detected and stripped before display
+* Natural-language querying of viral taxonomy and virus–host relationships
+* Authoritative taxonomy/acronym resolution via NCBI Taxonomy (e.g. `HIV` → `Lentivirus humimdef1`)
+* SQL queries against a multi-GB virus–host Parquet dataset on S3, without ever loading it into memory (DuckDB + `httpfs`/`spatial`)
+* Interactive Plotly charts and geographic maps
+* Wikipedia and PubMed lookups for biological/clinical background, with mandatory inline citations
+* 🎤 Voice input — record a question, transcribed via Albert API's Whisper endpoint
+* PMID hallucination guard: any PMID not returned by an actual `pubmed_search` call is stripped from the answer
+* Per-tool-call status line (search keyword only — no clutter for dataset/map calls) with full detail logged to disk
+* In-app error reporting button (question, answer, executed code, and recent logs bundled into a report file)
 
 ---
 
-## Scientific Constraints
+## Datasets
 
-The AI operates under strict rules enforced through the system prompt and post-processing:
+| Dataset | Storage | Description |
+|---|---|---|
+| **Taxonomy** (`df_taxo`) | Local CSV (`data/TAXONOMY.csv`), loaded fully into memory | NCBI Taxonomy, enriched with genome assembly availability, SRA sequencing activity, and GBIF biodiversity observations. One row per taxon. |
+| **Virus–host occurrences** (`host` / `df_host`) | Parquet on S3, queried on demand via DuckDB — never fully loaded | SRA/GenBank/BioSample samples linked to host & virus taxonomy, geographic location (as a `GEOMETRY` point column), and disease status. |
 
-* No invention of taxa, species counts, or biological claims
-* No implicit or hidden knowledge — all statements must be grounded in data or tool output
-* No speculative interpretation
-* **Host lookup is two-step**: host name → `TAX_ID` via `viral_taxo.csv`, then `TAX_ID` match in the occurrence table
-* **PMID hallucination guard**: a whitelist of real PMIDs is built from actual `pubmed_search` calls; any PMID absent from this whitelist is stripped from the final response and logged as a warning
-* If information is unavailable, the agent states explicitly:
-
-> "This information is not available in the current dataset or sources."
-
----
-
-## Capabilities
-
-* Natural language querying of viral taxonomy and virus–host relationships
-* Two-step host resolution (name → TAX_ID → occurrence records)
-* Aggregation, comparative analysis, species/genus/family counts
-* Interactive Plotly visualizations and geographic maps
-* Wikipedia and PubMed integration for biological context
-* Error reporting system (user-facing feedback button)
-* Full session logging with tool call tracing
+Column-by-column descriptions of both datasets are **not hardcoded in the client** — they are
+published by the MCP server as resources (`resource://datasets/taxonomy/schema` and
+`resource://datasets/host/schema`) and read once per conversation by `app.py`, which folds them
+into the system prompt. This means the two datasets' schemas can change server-side without any
+client code change.
 
 ---
 
-## Deployment
+## Setup
 
 ### Requirements
 
-* Python 3.9+
+* Python 3.10+
 * An **Albert API key** ([albert.api.etalab.gouv.fr](https://albert.api.etalab.gouv.fr))
+* Read access to the S3-compatible bucket hosting the virus–host Parquet dataset
 * Python packages:
 
+```bash
+pip install streamlit "fastmcp>=3" duckdb pandas numpy plotly requests
 ```
-streamlit
-pandas
-numpy
-requests
-plotly
-```
+
+(`streamlit>=1.53` is required for the native microphone button in the chat input.)
 
 ### Configuration
 
-Create `.streamlit/secrets.toml`:
+Secrets are split into **two separate `.env` files, one per process** — never shared, never
+imported by the other process:
 
-```toml
-ALBERT_API_KEY = "your_key_here"
+* **`.env.app`** — read by `app.py` (copy from [`.env.app.example`](.env.app.example)):
 
-# Optional access protection
-PASSWORD_ENABLED = true
-ACCESS_CODE = "your_access_code"
-```
+  ```bash
+  ALBERT_API_KEY=sk-...
 
-### Commands
+  # Optional access protection
+  # PASSWORD_ENABLED=true
+  # ACCESS_CODE=your_access_code
+  ```
+
+* **`.env.mcp`** — read by `server_mcp.py` (copy from [`.env.mcp.example`](.env.mcp.example)):
+
+  ```bash
+  ENDPOINT=your-s3-endpoint
+  ACCESS_KEY=...
+  SECRET_KEY=...
+  BUCKET=...
+  VIRAL_HOST_DATASET=your_dataset.parquet
+
+  # Optional, default shown:
+  # REGION=fr
+  # S3_URL_STYLE=path
+  ```
+
+Both files are gitignored. When deploying to **Streamlit Community Cloud**, use
+`.streamlit/secrets.toml` instead for the app-side secrets — it takes priority over `.env.app`
+whenever both are present (see `_get_secret`/`_get_bool_secret` in `app.py`).
+
+Non-secret configuration (model defaults, sampling parameters, timeouts, the MCP server URL, …)
+lives in `config.py`, shared by both processes.
+
+### Running
+
+Two terminals, in order:
 
 ```bash
-pip install streamlit pandas numpy requests plotly
+# 1. Start the MCP server (loads the taxonomy CSV, connects to S3)
+python server_mcp.py
 
-streamlit run app_albert.py
+# 2. Start the Streamlit app (connects to the MCP server at MCP_SERVER_URL)
+streamlit run app.py
 ```
 
+`app.py` checks the MCP server is reachable on startup and refuses to proceed otherwise.
+
+### Running with Docker
+
+A single image runs both processes (`server_mcp.py` in the background, then `streamlit run app.py`
+via `entrypoint.sh`, once the MCP server is reachable):
+
+```bash
+docker build -t viromechat .
+docker run -p 8501:8501 --env-file .env.app --env-file .env.mcp viromechat
+```
+
+Secrets are excluded from the image by `.dockerignore` — always pass them at `docker run` time
+(`--env-file`, or individual `-e KEY=value` flags), never bake them into the image.
+
 ---
 
-## Example Research Queries
+## Scientific Guardrails
 
-* "Summarize Orthopoxvirus (family, genus, species count)"
-* "List virus families with more than 100 recorded species"
-* "Compare species counts between Orthomyxoviridae and Coronaviridae"
-* "Show a pie chart of genus distribution in Poxviridae"
-* "World distribution of Poxviridae"
-* "What viruses infect Bos taurus?"
-* "Tell me more about feline viruses"
+Enforced through the system prompt, tool-level validation, and post-processing on the client:
+
+* No invention of taxa, species counts, coordinates, or any biological fact — every statement must trace back to a tool call.
+* Acronyms (HIV, MPOX, SARS, …) must be resolved via `ncbi_taxonomy_search` before being used in any other tool.
+* `query_host_sql` rejects bare `SELECT *` (it would pull ~65 columns, including a heavy geometry blob, across the whole S3 dataset) and only allows read-only `SELECT` statements.
+* **PMID hallucination guard**: a whitelist of real PMIDs is built from actual `pubmed_search` calls in the conversation; any PMID outside that whitelist is stripped from the final answer and logged.
+* Bracket-style citation artifacts (e.g. `【4†L13-L17】`, a known gpt-oss-120b browsing-tool artifact) are stripped — citations must be real Markdown links to a URL actually returned by a tool.
+* If information is absent from the datasets and tools, the agent must say so explicitly rather than guess.
 
 ---
 
-## Transparency & Reproducibility
+## Example Queries
 
-* Executed pandas code is visible in the "Sources" expander of each response
-* Generated visualizations are deterministic given the same dataset
-* Wikipedia and PubMed URLs are explicitly displayed per response
-* Tool calls are limited, numbered, and fully traced in logs (`agent_YYYY-MM.log`)
-* All PMID citations are verified against actual tool call output — hallucinated PMIDs are logged and removed
-* Error reports (question, answer, executed code, log excerpt) can be submitted via the in-app feedback button
+* "Give me information about Orthopoxvirus — is it a genus or a family, and how many species does it include?"
+* "Show a pie chart of genus distribution within Poxviridae."
+* "World distribution of Poxviridae."
+* "Tell me more about Polyomavirus infection pathway."
+* "What is HBV, exactly, taxonomically?"
+
+---
+
+## Transparency & Logging
+
+* Executed SQL/pandas code is shown in the "📚 Sources" expander of each response.
+* Wikipedia, PubMed, and NCBI Taxonomy links used to build an answer are listed separately in the same expander.
+* Every tool call is numbered and fully traced in `logs/agent_YYYY-MM.log`, including a preview of the actual response content (not just success/failure).
+* Error reports submitted via the in-app "🚩 Report an error" button are saved to `logs/error_reports/`, bundled with the question, answer, executed code, and recent log lines.
 
 ---
 
 ## ⚠️ Disclaimer
 
-This system is intended for exploratory and research support purposes only.
-All outputs should be independently verified before use in scientific or medical contexts.
-The agent may miss viruses absent from the SRA-derived dataset, and dataset coverage does not reflect epidemiological prevalence or clinical severity.
+This system is intended for exploratory and research support purposes only. All outputs should
+be independently verified before use in scientific or medical contexts. Dataset coverage reflects
+what has been sequenced and deposited in public repositories — it does not reflect epidemiological
+prevalence or clinical severity.
 
 ---
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 (GPL-3.0).
+GNU General Public License v3.0 (GPL-3.0) — see [LICENSE](LICENSE).

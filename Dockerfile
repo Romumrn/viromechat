@@ -1,28 +1,31 @@
 # Utilise une image Python légère et officielle
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 # Définit le répertoire de travail
 WORKDIR /app
 
-# Installe les dépendances système nécessaires
+# Installe les dépendances système nécessaires (curl : healthcheck du MCP dans entrypoint.sh)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Installe les dépendances Python directement (d'après le README)
-RUN pip install --no-cache-dir streamlit pandas numpy requests plotly
+# Installe les dépendances Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Crée un utilisateur non-root pour des raisons de sécurité
 RUN addgroup --system app && adduser --system --ingroup app app
 
-# Copie le reste de l'application
+# Copie le reste de l'application (secrets exclus via .dockerignore —
+# passer .env.app / .env.mcp au runtime via --env-file ou -e)
 COPY --chown=app:app . .
+RUN chmod +x entrypoint.sh
 
-# Rend le port 8501 accessible (port par défaut de Streamlit)
-EXPOSE 8501
+# 8501 : Streamlit (app.py) — 8000 : serveur MCP (server_mcp.py)
+EXPOSE 8501 8000
 
 # Passe à l'utilisateur non-root
 USER app
 
-# Commande pour lancer l'application
-CMD ["streamlit", "run", "app.py"]
+# Lance les deux process : server_mcp.py en arrière-plan, puis streamlit
+CMD ["./entrypoint.sh"]

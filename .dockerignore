@@ -1,0 +1,15 @@
+.git
+.gitignore
+.DS_Store
+.ipynb_checkpoints
+__pycache__
+*.pyc
+
+# Secrets — pass these at runtime instead (docker run -e / --env-file)
+.env
+.env.app
+.env.mcp
+.streamlit/secrets.toml
+
+logs
+*.ipynb

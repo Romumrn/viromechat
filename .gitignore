@@ -1,3 +1,9 @@
 .DS_Store
 logs/*
 data*
+
+# Secrets — see .env.app.example / .env.mcp.example for the expected keys
+.env
+.env.app
+.env.mcp
+.streamlit/secrets.toml
