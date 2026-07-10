@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  virus-ai-agent:
+    build: .
+    container_name: virus-ai-agent
+    environment:
+      - STREAMLIT_BROWSER_GATHERUSAGESTATS=false
+      - HOME=/tmp
+    env_file:
+      - .env.app
+      - .env.mcp
+    volumes:
+      - ./data:/app/data:ro
+      - ./logs:/app/logs
+      - ./.streamlit:/app/.streamlit:ro
+      - /tmp:/home/app
+    restart: unless-stopped
+    network_mode: "host"
+    # Pas de "command:" : l'entrypoint du Dockerfile (entrypoint.sh) lance
+    # server_mcp.py (port 8000) PUIS streamlit (port 8501) — un override
+    # "streamlit run app.py" seul ne démarrerait pas le serveur MCP.

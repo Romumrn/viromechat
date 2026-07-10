@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Crée un utilisateur non-root pour des raisons de sécurité
-RUN addgroup --system app && adduser --system --ingroup app app
+RUN addgroup --gid 1000 app && adduser --uid 1000 --gid 1000 --system app
 
 # Copie le reste de l'application (secrets exclus via .dockerignore —
 # passer .env.app / .env.mcp au runtime via --env-file ou -e)
