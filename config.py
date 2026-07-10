@@ -13,7 +13,6 @@ import os
 
 # ==================== PATHS ==================== #
 TAXO_DB_PATH = "data/TAXONOMY.csv"
-HOST_DB_PATH = "data/viral_host_clean_llm.csv"
 LOG_DIR      = "logs"
 
 APP_ENV_PATH = ".env.app"
@@ -65,6 +64,10 @@ DEFAULT_PARALLEL_TOOL_CALLS = False
 
 DEFAULT_MAX_TOOL_CALLS = 7
 DEFAULT_MAX_TOOL_CONTENT = 6000
+
+# How many user questions the model keeps full context for (its own tool
+# calls/results included) before the conversation memory resets.
+MAX_CONTEXT_TURNS = 10
 
 # ==================== UI DEFAULTS ==================== #
 DEFAULT_PREVIEW_ROWS   = 50
