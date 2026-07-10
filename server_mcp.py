@@ -111,9 +111,6 @@ class DataContext:
         self.host_con = con
         self.host_columns = [row[0] for row in con.execute("DESCRIBE host").fetchall()]
 
-    def is_ready(self) -> bool:
-        return self.df_taxo is not None and self.host_con is not None
-
 
 ctx = DataContext()
 
@@ -174,6 +171,20 @@ def _check_figure_has_data(fig: go.Figure) -> bool:
         if values is not None:
             if hasattr(values, "__len__") and len(values) > 0:
                 return True
+    return False
+
+
+def _check_hover_has_column(fig: go.Figure, column: str) -> bool:
+    """
+    Returns True if `column` appears in some trace's hovertemplate — Plotly
+    Express renders each `hover_data` column as a literal `column=%{...}`
+    label in the template, so this reliably detects whether a given column
+    was actually included in hover_data (not just present in the dataframe).
+    """
+    for trace in fig.data:
+        tmpl = getattr(trace, "hovertemplate", None)
+        if tmpl and column in tmpl:
+            return True
     return False
 
 
@@ -608,15 +619,17 @@ def query_host_sql(sql: str, preview_rows: int = DEFAULT_PREVIEW_ROWS) -> dict:
         WHERE VIRUS_FAMILY ILIKE '%poxviridae%'
         LIMIT 10000
 
-        -- Rows for create_map (coordinates MUST be extracted like this)
-        #Here we want to get the coordinates of all host-virus observations for the Poxviridae family, 
-        # but we only want the first 50,000 rows to avoid overloading the system. 
+        -- Rows for create_map (coordinates MUST be extracted like this;
+        -- primary_id MUST always be included — it's the sample identifier
+        -- create_map requires in hover_data)
+        #Here we want to get the coordinates of all host-virus observations for the Poxviridae family,
+        # but we only want the first 50,000 rows to avoid overloading the system.
         # We also want to make sure that we only include rows where the geometry is not null, since we can't map points without coordinates.
         SELECT ST_X(geometry) AS lon, ST_Y(geometry) AS lat,
-               VIRUS_SPECIES, HOST_TAX_NAME, COUNTRY
+               primary_id, VIRUS_SPECIES, HOST_TAX_NAME, COUNTRY
         FROM host
         WHERE VIRUS_FAMILY ILIKE '%poxviridae%' AND geometry IS NOT NULL
-        LIMIT 50000 
+        LIMIT 50000
 
     Args:
         sql: A single read-only SELECT statement against the `host` table.
@@ -733,8 +746,8 @@ def create_visualization(code: str) -> dict:
     You MUST assign your Plotly figure to the variable 'fig'.
 
     Example:
-        data = df_taxo.groupby('family').size().reset_index(name='count')
-        fig = px.bar(data, x='family', y='count', title='Species per Family')
+        data = df_taxo.groupby('FAMILY_NAME').size().reset_index(name='count')
+        fig = px.bar(data, x='FAMILY_NAME', y='count', title='Species per Family')
 
     IMPORTANT: NEVER search with acronyms (HIV, HBV, etc.). Always use the
     full scientific name. If the tool returns an error about empty data or
@@ -805,13 +818,18 @@ def create_map(code: str) -> dict:
     If df_host doesn't have 'lat'/'lon' columns, call query_host_sql again
     with that extraction before using this tool.
 
+    MANDATORY — sample identifier: every point plotted MUST be traceable back
+    to its exact sample. Your preceding query_host_sql call MUST SELECT
+    `primary_id` (the BioSample accession), and `primary_id` MUST be included
+    in `hover_data` below. A map without it will be REJECTED.
+
     EXACT TEMPLATE TO FOLLOW (mandatory, adapt only the title and any
-    extra narrowing):
+    extra narrowing — but NEVER drop primary_id from hover_data):
         data = df_host.dropna(subset=['lat', 'lon'])
         fig = px.scatter_mapbox(
             data, lat='lat', lon='lon',
             hover_name='VIRUS_SPECIES',
-            hover_data=['HOST_TAX_NAME', 'COUNTRY'],
+            hover_data=['primary_id', 'HOST_TAX_NAME', 'COUNTRY'],
             color='VIRUS_SPECIES',
             zoom=1, title='TITLE'
         )
@@ -859,6 +877,15 @@ def create_map(code: str) -> dict:
                 "Use the full scientific species name instead of an acronym (e.g. 'Orthopoxvirus' not 'MPOX'). "
                 "Call query_host_sql again with a broader ILIKE filter, or read the "
                 "resource://datasets/host/schema resource to inspect what columns exist."
+            )
+
+        if not _check_hover_has_column(fig, "primary_id"):
+            return _fail(
+                "Error: the map is missing the sample identifier (primary_id) — every "
+                "point MUST be traceable back to its exact BioSample sample. Fix BOTH: "
+                "1) your query_host_sql SELECT must include primary_id, and "
+                "2) hover_data=[...] in px.scatter_mapbox must include 'primary_id'. "
+                "Retry create_map with primary_id in hover_data."
             )
 
         title = _figure_title(fig)
