@@ -31,13 +31,14 @@ from prompt import build_system_prompt
 from config import (
     ALBERT_BASE_URL, ALBERT_TIMEOUT, ALBERT_MODEL_DEFAULT, ALBERT_WHISPER_MODEL,
     LOG_DIR, MCP_SERVER_URL, APP_ENV_PATH,
-    PAGE_ICON, GITHUB_URL,
+    PAGE_TITLE, PAGE_ICON, GITHUB_URL,
     DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_PRESENCE_PENALTY,
     DEFAULT_FREQUENCY_PENALTY,
     DEFAULT_MAX_COMPLETION_TOKENS,
     DEFAULT_PARALLEL_TOOL_CALLS, DEFAULT_SEED,
     DEFAULT_MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CONTENT,
     DEFAULT_PREVIEW_ROWS, DEFAULT_WIKIPEDIA_LIMIT,
+    MAX_CONTEXT_TURNS,
     load_env_file,
 )
 from logging_utils import setup_logger
@@ -55,7 +56,7 @@ logger = setup_logger(LOG_DIR)
 
 # ── UI labels for tool status display (kept local — no need to reach the
 #    server just to show an icon). Must stay in sync with the tool names
-#    exposed by virome_mcp_server.py. ─────────────────────────────────────────
+#    exposed by server_mcp.py. ─────────────────────────────────────────
 TOOL_LABELS = {
     "wikipedia_search":     ("📖", "Wikipedia search"),
     "pubmed_search":        ("🔬", "PubMed search"),
@@ -549,7 +550,7 @@ def render_report_button(msg_idx: int, question: str, answer: str, executed_code
 async def albert_agent_loop(
     model: str,
     api_key: str,
-    user_query: str, 
+    user_query: str,
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
@@ -562,6 +563,7 @@ async def albert_agent_loop(
     seed: int = DEFAULT_SEED,
     max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
     parallel_tool_calls: bool = DEFAULT_PARALLEL_TOOL_CALLS,
+    history_messages: list | None = None,
 ):
     """
     Main agentic loop: iteratively calls Albert API with tool-calling capability.
@@ -569,13 +571,23 @@ async def albert_agent_loop(
     touches the DataFrames, it only talks MCP over one shared connection
     (opened once for the whole loop via `mcp_session()`).
 
+    history_messages, if given, is the full message history (user/assistant/
+    tool messages — everything except the system prompt) from previous
+    turns in this conversation, replayed before the new user_query so the
+    model has full context of earlier questions, its own tool calls, and
+    their results.
+
     The loop continues until:
     - The model returns a final answer (no tool calls)
     - Maximum tool call limit is reached
     - An error occurs
 
     Returns:
-        Tuple of (answer_text, figures, wikipedia_urls, pubmed_urls, ncbi_urls, executed_codes)
+        Tuple of (answer_text, figures, wikipedia_urls, pubmed_urls, ncbi_urls,
+        executed_codes, updated_history). updated_history is the full message
+        history (system prompt excluded) including this turn, ready to pass
+        as history_messages on the next call — or None if the call failed,
+        in which case the caller should keep the previous history unchanged.
     """
 
     used_wikipedia_urls = []
@@ -619,10 +631,10 @@ async def albert_agent_loop(
         datasets_description = await _describe_available_datasets(mcp)
         system_prompt = build_system_prompt(datasets_description)
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query},
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
+        if history_messages:
+            messages.extend(history_messages)
+        messages.append({"role": "user", "content": user_query})
 
         while True:
             logger.info(
@@ -648,13 +660,13 @@ async def albert_agent_loop(
                 logger.error("ALBERT_TIMEOUT")
                 return (
                     "The model took too long to respond (>180 s). Please try again.",
-                    generated_figures, [], [], [], executed_codes,
+                    generated_figures, [], [], [], executed_codes, None,
                 )
             except Exception as e:
                 logger.error(f"ALBERT_ERROR | {e}")
                 return (
                     f"Could not reach Albert API: {e}",
-                    generated_figures, [], [], [], executed_codes,
+                    generated_figures, [], [], [], executed_codes, None,
                 )
 
             choice = resp["choices"][0]
@@ -671,7 +683,7 @@ async def albert_agent_loop(
             if finish != "tool_calls" or not msg.get("tool_calls"):
                 final_text = (msg.get("content") or "").strip()
 
-                if not final_text and tool_call_count < 3 and tool_call_count > 0:
+                if not final_text and tool_call_count > 0 and tool_call_count < min(3, max_tool_calls):
                     logger.warning(
                         f"EARLY_STOP | finish=stop, content empty, only {tool_call_count} tool calls — "
                         f"injecting continuation prompt"
@@ -797,6 +809,7 @@ async def albert_agent_loop(
                     used_pubmed_urls,
                     used_ncbi_urls,
                     executed_codes,
+                    messages[1:],  # everything except the system prompt
                 )
 
             # ── CASE 2: Tool calls ───────────────────────────────────────────
@@ -863,13 +876,17 @@ async def albert_agent_loop(
                     for artifact in output.get("artifacts", []):
                         a_type = artifact.get("type")
                         if a_type == "url":
-                            used_wikipedia_urls.append(artifact["url"])
+                            if artifact["url"] not in used_wikipedia_urls:
+                                used_wikipedia_urls.append(artifact["url"])
                         elif a_type == "pubmed":
                             for pmid in artifact.get("pmids", []):
-                                used_pubmed_urls.append(f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+                                pubmed_url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                                if pubmed_url not in used_pubmed_urls:
+                                    used_pubmed_urls.append(pubmed_url)
                                 real_pmids.add(str(pmid))
                         elif a_type == "ncbi_taxonomy":
-                            used_ncbi_urls.append(artifact["url"])
+                            if artifact["url"] not in used_ncbi_urls:
+                                used_ncbi_urls.append(artifact["url"])
                         elif a_type == "plotly":
                             generated_figures.append(pio.from_json(json.dumps(artifact["figure"])))
 
@@ -928,7 +945,7 @@ async def check_mcp_connection() -> bool:
 
 def main():
     """Main Streamlit application entry point."""
-    st.set_page_config(page_icon="🦠", layout="wide")
+    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="wide")
 
     if _get_bool_secret("PASSWORD_ENABLED"):
         check_password()
@@ -1048,6 +1065,13 @@ A chatbot to explore viral metagenomic data from the Virome@tlas project.
     # ── Initialize chat history ──────────────────────────────────────────────
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    # Raw OpenAI-format history (user/assistant/tool messages, system prompt
+    # excluded) replayed to the model on each new question — separate from
+    # "messages" above, which is the UI display format.
+    if "conversation_messages" not in st.session_state:
+        st.session_state.conversation_messages = []
+    if "context_turn_count" not in st.session_state:
+        st.session_state.context_turn_count = 0
 
     # ── Display chat history ─────────────────────────────────────────────────
     for msg_idx, msg in enumerate(st.session_state.messages):
@@ -1083,6 +1107,18 @@ A chatbot to explore viral metagenomic data from the Virome@tlas project.
 
     # ── Query handling (shared by text input and mic input) ─────────────────
     def _handle_query(query: str):
+        if st.session_state.context_turn_count >= MAX_CONTEXT_TURNS:
+            st.session_state.conversation_messages = []
+            st.session_state.context_turn_count = 0
+            reset_notice = (
+                f"🔄 Conversation context reset after {MAX_CONTEXT_TURNS} questions — "
+                f"starting fresh. Earlier exchanges are no longer remembered."
+            )
+            st.session_state.messages.append({"role": "assistant", "content": reset_notice})
+            with st.chat_message("assistant"):
+                st.markdown(reset_notice)
+            logger.info(f"CONTEXT_RESET | limit={MAX_CONTEXT_TURNS} questions reached")
+
         st.session_state.messages.append({"role": "user", "content": query})
         with st.chat_message("user"):
             st.markdown(query)
@@ -1091,7 +1127,7 @@ A chatbot to explore viral metagenomic data from the Virome@tlas project.
             status_placeholder = st.empty()
             status_container = status_placeholder.status("Processing…", expanded=True)
 
-            answer, figures, wikipedia_urls, pubmed_urls, ncbi_urls, executed_codes = asyncio.run(
+            answer, figures, wikipedia_urls, pubmed_urls, ncbi_urls, executed_codes, updated_history = asyncio.run(
                 albert_agent_loop(
                     model=model,
                     api_key=api_key,
@@ -1108,6 +1144,7 @@ A chatbot to explore viral metagenomic data from the Virome@tlas project.
                     seed=seed,
                     max_completion_tokens=max_completion_tokens,
                     parallel_tool_calls=parallel_tool_calls,
+                    history_messages=st.session_state.conversation_messages,
                 )
             )
 
@@ -1129,6 +1166,13 @@ A chatbot to explore viral metagenomic data from the Virome@tlas project.
                 answer=answer,
                 executed_codes=executed_codes,
             )
+
+        # Only grow the remembered context on a successful turn — a failed
+        # call (timeout, API error) has nothing useful to remember and
+        # shouldn't count against the question limit either.
+        if updated_history is not None:
+            st.session_state.conversation_messages = updated_history
+            st.session_state.context_turn_count += 1
 
         st.session_state.messages.append({
             "role": "assistant",
