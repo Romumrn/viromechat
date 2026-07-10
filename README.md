@@ -55,9 +55,30 @@ Both processes read their own, separate secrets file — see [Configuration](#co
 * Interactive Plotly charts and geographic maps
 * Wikipedia and PubMed lookups for biological/clinical background, with mandatory inline citations
 * 🎤 Voice input — record a question, transcribed via Albert API's Whisper endpoint
+* Conversation memory across up to 10 questions (full tool-call trace, not just Q&A) with an explicit in-chat reset notice once the limit is hit
 * PMID hallucination guard: any PMID not returned by an actual `pubmed_search` call is stripped from the answer
 * Per-tool-call status line (search keyword only — no clutter for dataset/map calls) with full detail logged to disk
 * In-app error reporting button (question, answer, executed code, and recent logs bundled into a report file)
+
+---
+
+## Conversation Memory
+
+Each new question is answered with full context of the previous ones — including every tool call
+the model made and the results it got back, not just a summary of the final answers. This lets the
+model resolve follow-ups like *"and which family is that genus part of?"* without the subject
+being restated.
+
+This context accumulates for up to `MAX_CONTEXT_TURNS` questions (`config.py`, default **10**).
+Once the limit is reached, the conversation memory resets — a message is posted in the chat
+("🔄 Conversation context reset after 10 questions — starting fresh…") and the next question starts
+with no memory of what came before. A failed turn (API timeout/error) is never added to memory and
+doesn't count against the limit.
+
+Given the model's 131k-token context window and that full agent traces are kept (not just
+Q&A), a heavy question involving several tool calls can add a few thousand tokens to memory — the
+10-question cap keeps this comfortably bounded rather than growing unbounded for the life of a
+session.
 
 ---
 
@@ -83,13 +104,11 @@ client code change.
 * Python 3.10+
 * An **Albert API key** ([albert.api.etalab.gouv.fr](https://albert.api.etalab.gouv.fr))
 * Read access to the S3-compatible bucket hosting the virus–host Parquet dataset
-* Python packages:
+* Python packages (`streamlit>=1.53` is required for the native microphone button in the chat input):
 
 ```bash
-pip install streamlit "fastmcp>=3" duckdb pandas numpy plotly requests
+pip install -r requirements.txt
 ```
-
-(`streamlit>=1.53` is required for the native microphone button in the chat input.)
 
 ### Configuration
 
@@ -163,6 +182,7 @@ Enforced through the system prompt, tool-level validation, and post-processing o
 * No invention of taxa, species counts, coordinates, or any biological fact — every statement must trace back to a tool call.
 * Acronyms (HIV, MPOX, SARS, …) must be resolved via `ncbi_taxonomy_search` before being used in any other tool.
 * `query_host_sql` rejects bare `SELECT *` (it would pull ~65 columns, including a heavy geometry blob, across the whole S3 dataset) and only allows read-only `SELECT` statements.
+* `create_map` rejects any map that doesn't include the sample identifier (`primary_id`) in its hover data — every plotted point must be traceable back to its exact BioSample sample.
 * **PMID hallucination guard**: a whitelist of real PMIDs is built from actual `pubmed_search` calls in the conversation; any PMID outside that whitelist is stripped from the final answer and logged.
 * Bracket-style citation artifacts (e.g. `【4†L13-L17】`, a known gpt-oss-120b browsing-tool artifact) are stripped — citations must be real Markdown links to a URL actually returned by a tool.
 * If information is absent from the datasets and tools, the agent must say so explicitly rather than guess.

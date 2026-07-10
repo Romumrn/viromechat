@@ -138,6 +138,13 @@ Same as `create_visualization`, but enforces `px.scatter_mapbox(...)` (never `sc
 that the preceding `query_host_sql` call already extracted `lon`/`lat` from `geometry`. Returns a
 `plotly` artifact.
 
+**Mandatory sample identifier**: the resulting figure is rejected unless `primary_id` (the
+BioSample accession) appears in `hover_data` — every plotted point must be traceable back to its
+exact sample, not just to a species/species-level aggregate. This is enforced in code
+(`_check_hover_has_column(fig, "primary_id")`, which detects the column via the literal
+`primary_id=%{customdata[...]}` label Plotly Express writes into `hovertemplate`), not just
+requested in the docstring — a map missing it is a hard `_fail(...)`, not a soft warning.
+
 ---
 
 ## Extending the server
