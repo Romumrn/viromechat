@@ -245,11 +245,15 @@ Secrets are excluded from both images by `.dockerignore` — each service loads 
 `.env.app` / `.env.mcp` at runtime via Compose's `env_file:`, never baked into the image. Local
 accounts (`auth_data/.streamlit_auth.yaml`, i.e. `AUTH_CONFIG_PATH`) live in a **host bind-mount**
 (`./auth_data`), so the file sits directly on the host/VM and can be read, edited, or backed up
-without going through the container. The `auth_data/` directory is tracked in git (via
-`.gitkeep`, its contents gitignored) so it exists — owned by the host user — before the first run;
-the container's app user is uid 1000, which matches the default first user on an Ubuntu VM. If
-account creation ever fails with a `PermissionError` on some host, fix the directory ownership
-once with `sudo chown -R 1000:1000 auth_data`.
+without going through the container. The `auth_data/` directory is tracked in git (via `.gitkeep`,
+its contents gitignored) so it exists before the first run.
+
+Because a bind-mount keeps the host directory's ownership — which may not match the container's
+non-root `app` user (uid 1000) and would otherwise cause `PermissionError: … auth_data/…` — the
+app container starts from an entrypoint (`entrypoint-app.sh`) that runs briefly as root to
+`chown` the mounted `auth_data/` and `logs/` to the app user, then drops privileges (via `gosu`)
+to run Streamlit as `app`. So account creation works regardless of host-side ownership, no manual
+`chown` needed.
 
 
 ## ⚠️ Disclaimer
