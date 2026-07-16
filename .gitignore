@@ -8,8 +8,11 @@ __pycache__/*
 .env.mcp
 .streamlit/secrets.toml
 
-# Local user accounts (usernames, bcrypt-hashed passwords, cookie key)
-auth_data/
+# Local user accounts (usernames, bcrypt-hashed passwords, cookie key):
+# keep the directory tracked (so the Docker bind-mount has a host dir owned
+# by the host user before first run) but never commit the credentials file.
+auth_data/*
+!auth_data/.gitkeep
 test_neo4j.ipynb
 test_S3MCP.ipynb
 .gitignore

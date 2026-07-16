@@ -126,16 +126,26 @@ external identity provider, no email service — built on top of
 [`streamlit-authenticator`](https://github.com/mkhorasani/Streamlit-Authenticator) for login,
 session cookies, and credential storage, with a custom minimal registration form:
 
-* **Registration** — first name, last name, academic email, password, and a captcha (to deter
-  bot sign-ups). No separate username (the email doubles as one), no repeat-password field. The
-  email address isn't domain-verified — "academic" is just the field's label, not an enforced
-  restriction. Self-service and collapsed by default: anyone who can reach the app can register,
-  but the form only expands once someone clicks "Create an account".
+* **Registration** — first name, last name, institutional email, password, and a captcha (to deter
+  bot sign-ups). No separate username (the email doubles as one), no repeat-password field.
+  Validated at submit: the password must be **at least 6 characters and contain 1 special
+  character** (shown as a hint under the field), and the email domain must **not** be a free
+  webmail provider (Gmail, Outlook, Yahoo, iCloud, Proton, Orange, … — see `_BLOCKED_EMAIL_DOMAINS`
+  in `app.py`). This is a quick blocklist, not a real institution allowlist — someone with their
+  own custom domain still gets through, the goal is just to steer people to their work address.
+  Self-service and collapsed by default: anyone who can reach the app can register, but the form
+  only expands once someone clicks "Create an account".
+* **Optional invite code** — set `REGISTRATION_CODE` in `.env.app` (or `.streamlit/secrets.toml`)
+  to gate registration behind a shared code: an extra "Registration code" field appears and must
+  match before an account is created. Leave it unset to keep registration open. The expected value
+  is only ever read from the secret, never stored in the source.
 * **Login** — asks for email + password. A signed cookie then keeps the user logged in across page
   reloads for `cookie.expiry_days` (30 by default).
-* **Storage** — emails, bcrypt-hashed passwords, first/last names live in `.streamlit_auth.yaml`
-  (gitignored, auto-created on first run with a random cookie-signing key). There is no email
-  verification step — account creation is immediate, gated only by email uniqueness.
+* **Storage** — emails, bcrypt-hashed passwords, first/last names live in
+  `auth_data/.streamlit_auth.yaml` (gitignored, auto-created on first run with a random
+  cookie-signing key; under Docker it's a host bind-mount, see [Running with Docker](#running-with-docker)).
+  There is no email verification step — account creation is immediate, gated only by email
+  uniqueness.
 * **Per-user chat history** — each account's conversation (questions, answers, and the Albert-format
   context used for follow-ups) is saved to its own file under `logs/user_histories/` and reloaded
   on login, so it persists across sessions. A "🗑️ Clear my history" button in the sidebar resets it.
@@ -233,10 +243,13 @@ docker compose up --build
 
 Secrets are excluded from both images by `.dockerignore` — each service loads only its own
 `.env.app` / `.env.mcp` at runtime via Compose's `env_file:`, never baked into the image. Local
-accounts (`auth_data/`, i.e. `AUTH_CONFIG_PATH`) live in a named Docker volume, not the container's
-writable layer — this also sidesteps host/VM-specific UID mismatches that would otherwise turn
-account creation into a `PermissionError` on some hosts (bind mounts inherit the host filesystem's
-ownership; a named volume doesn't).
+accounts (`auth_data/.streamlit_auth.yaml`, i.e. `AUTH_CONFIG_PATH`) live in a **host bind-mount**
+(`./auth_data`), so the file sits directly on the host/VM and can be read, edited, or backed up
+without going through the container. The `auth_data/` directory is tracked in git (via
+`.gitkeep`, its contents gitignored) so it exists — owned by the host user — before the first run;
+the container's app user is uid 1000, which matches the default first user on an Ubuntu VM. If
+account creation ever fails with a `PermissionError` on some host, fix the directory ownership
+once with `sudo chown -R 1000:1000 auth_data`.
 
 
 ## ⚠️ Disclaimer

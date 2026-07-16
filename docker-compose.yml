@@ -53,16 +53,17 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./.streamlit:/app/.streamlit:ro
-      # Named volume (not a host bind-mount): keeps registered accounts
-      # readable/writable by the container's non-root user and persisted
-      # across rebuilds, regardless of host-side UID/GID on a given VM.
-      - auth_data:/app/auth_data
+      # Host bind-mount: the accounts file lives directly on the VM at
+      # ./auth_data/.streamlit_auth.yaml, so it can be read/edited/backed up
+      # without going through the container. The directory is tracked in git
+      # (auth_data/.gitkeep) so it exists — owned by the host user — before
+      # the first "up"; the container's app user is uid 1000, which matches
+      # the default first user on an Ubuntu VM. If accounts fail to save with
+      # a PermissionError on some host, run: sudo chown -R 1000:1000 auth_data
+      - ./auth_data:/app/auth_data
     ports:
       - "8501:8501"
     depends_on:
       mcp:
         condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  auth_data:
