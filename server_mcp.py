@@ -900,4 +900,11 @@ def create_map(code: str) -> dict:
 
 if __name__ == "__main__":
     initialize_datasets()
-    mcp.run(transport="http", host="0.0.0.0", port=8000, path="/mcp")
+    # access_log=False: silences uvicorn's per-request log line (e.g. the
+    # periodic Docker healthcheck's "GET /mcp ... 406 Not Acceptable" —
+    # expected, not an error, just noisy every few seconds). Startup/error
+    # logs are untouched.
+    mcp.run(
+        transport="http", host="0.0.0.0", port=8000, path="/mcp",
+        uvicorn_config={"access_log": False},
+    )
