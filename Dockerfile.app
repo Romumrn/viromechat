@@ -9,8 +9,13 @@ WORKDIR /app
 COPY requirements-app.txt .
 RUN pip install --no-cache-dir -r requirements-app.txt
 
-# Crée un utilisateur non-root pour des raisons de sécurité
-RUN addgroup --gid 1000 app && adduser --uid 1000 --gid 1000 --system app
+# Crée un utilisateur non-root pour des raisons de sécurité, avec un vrai
+# HOME (writable) : "adduser --system" seul donne HOME=/nonexistent, et
+# Streamlit veut pouvoir écrire sous ~/.streamlit (config/credentials cache).
+RUN addgroup --gid 1000 app \
+    && adduser --uid 1000 --gid 1000 --system --home /home/app --shell /usr/sbin/nologin app \
+    && mkdir -p /home/app && chown app:app /home/app
+ENV HOME=/home/app
 
 COPY --chown=app:app app.py config.py prompt.py logging_utils.py ./
 
