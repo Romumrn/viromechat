@@ -14,11 +14,28 @@ services:
     healthcheck:
       # No curl in the slim image — a plain Python request is enough to know
       # the MCP server is up. Gates the "app" service's startup below.
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/mcp', timeout=3)"]
+      #
+      # The MCP server replies 406 to a bare GET on /mcp (it expects proper
+      # MCP-protocol headers, which a healthcheck has no business sending) —
+      # urlopen() raises HTTPError on any 4xx/5xx, so that has to be treated
+      # as "server is up and answering HTTP", not as a failure. Only a
+      # connection-level error (nothing listening yet) should fail the check.
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - |
+          import sys, urllib.error, urllib.request
+          try:
+              urllib.request.urlopen("http://localhost:8000/mcp", timeout=3)
+          except urllib.error.HTTPError:
+              pass
+          except Exception:
+              sys.exit(1)
       interval: 5s
       timeout: 3s
       retries: 10
-      start_period: 10s
+      start_period: 15s
 
   app:
     build:
