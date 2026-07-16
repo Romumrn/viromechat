@@ -1,9 +1,15 @@
 .DS_Store
 logs/*
 data*
-
+__pycache__/*
 # Secrets — see .env.app.example / .env.mcp.example for the expected keys
 .env
 .env.app
 .env.mcp
 .streamlit/secrets.toml
+
+# Local user accounts (usernames, bcrypt-hashed passwords, cookie key)
+.streamlit_auth.yaml
+test_neo4j.ipynb
+test_S3MCP.ipynb
+.gitignore
