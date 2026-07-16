@@ -4,9 +4,14 @@ Import in any module with: from config import *  or  from config import TAXO_DB_
 
 Secrets/credentials are NOT stored here — they live in two separate,
 gitignored .env files, one per process:
-  - .env.app  (loaded by app.py)         → ALBERT_API_KEY, PASSWORD_ENABLED, ACCESS_CODE
+  - .env.app  (loaded by app.py)         → ALBERT_API_KEY
   - .env.mcp  (loaded by server_mcp.py)  → S3 credentials (ENDPOINT, ACCESS_KEY, ...)
 See .env.app.example / .env.mcp.example for the expected keys.
+
+A user account is required to use the app — there is no guest mode. Accounts
+are handled entirely locally by streamlit-authenticator, with credentials
+stored in AUTH_CONFIG_PATH — also gitignored, see the ACCOUNTS section in
+app.py.
 """
 
 import os
@@ -17,6 +22,9 @@ LOG_DIR      = "logs"
 
 APP_ENV_PATH = ".env.app"
 MCP_ENV_PATH = ".env.mcp"
+
+AUTH_CONFIG_PATH  = ".streamlit_auth.yaml"           # local accounts (usernames, hashed passwords, cookie key)
+USER_HISTORY_DIR  = os.path.join(LOG_DIR, "user_histories")  # one JSON file per user, their chat history
 
 
 def load_env_file(env_path: str) -> None:
@@ -65,9 +73,11 @@ DEFAULT_PARALLEL_TOOL_CALLS = False
 DEFAULT_MAX_TOOL_CALLS = 7
 DEFAULT_MAX_TOOL_CONTENT = 6000
 
-# How many user questions the model keeps full context for (its own tool
-# calls/results included) before the conversation memory resets.
-MAX_CONTEXT_TURNS = 10
+# How many user questions the model keeps context for before the
+# conversation memory resets. Tool calls/results are stripped from history
+# after each turn (see _clean_history_messages in app.py), so this only
+# bounds the number of user/assistant text exchanges kept.
+MAX_CONTEXT_TURNS = 5
 
 # ==================== UI DEFAULTS ==================== #
 DEFAULT_PREVIEW_ROWS   = 50
