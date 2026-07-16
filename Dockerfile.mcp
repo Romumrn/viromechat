@@ -1,0 +1,24 @@
+# MCP data server (server_mcp.py) — owns the taxonomy CSV and the S3 host
+# Parquet dataset (via DuckDB), exposes them as MCP tools/resources over
+# HTTP. See Dockerfile.app for the Streamlit client that talks to it.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Installe les dépendances Python (server_mcp.py uniquement — voir requirements-mcp.txt)
+COPY requirements-mcp.txt .
+RUN pip install --no-cache-dir -r requirements-mcp.txt
+
+# Crée un utilisateur non-root pour des raisons de sécurité
+RUN addgroup --gid 1000 app && adduser --uid 1000 --gid 1000 --system app
+
+COPY --chown=app:app config.py server_mcp.py ./
+# ./data est monté en lecture seule au runtime (voir docker-compose.yml) —
+# pas besoin d'écrire sous /app, donc pas de chown supplémentaire ici.
+
+EXPOSE 8000
+
+USER app
+
+CMD ["python", "server_mcp.py"]

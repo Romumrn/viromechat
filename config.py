@@ -23,7 +23,11 @@ LOG_DIR      = "logs"
 APP_ENV_PATH = ".env.app"
 MCP_ENV_PATH = ".env.mcp"
 
-AUTH_CONFIG_PATH  = ".streamlit_auth.yaml"           # local accounts (usernames, hashed passwords, cookie key)
+# Kept in its own subdirectory (rather than directly under the app's working
+# directory) so it can be given its own persistent volume in Docker — see
+# docker-compose.yml — without also having to bind-mount the whole app
+# directory just to make this one file survive a container rebuild.
+AUTH_CONFIG_PATH  = os.path.join("auth_data", ".streamlit_auth.yaml")  # local accounts (usernames, hashed passwords, cookie key)
 USER_HISTORY_DIR  = os.path.join(LOG_DIR, "user_histories")  # one JSON file per user, their chat history
 
 
@@ -56,7 +60,11 @@ PAGE_TITLE   = "Virus Dataset AI Agent 🦠"
 PAGE_ICON    = "🦠"
 GITHUB_URL   = "https://github.com/Romumrn/chat-virus-AI"
 
-MCP_SERVER_URL = "http://localhost:8000/mcp"
+# Overridable via env var: app.py and server_mcp.py run in separate Docker
+# containers (see docker-compose.yml), where "localhost" no longer points
+# to the other container — compose sets this to http://mcp:8000/mcp there.
+# Local, non-Docker dev (both processes on the same host) keeps the default.
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8000/mcp")
 
 # ==================== AGENT DEFAULTS ==================== #
 DEFAULT_TEMPERATURE = 0.2

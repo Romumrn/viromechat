@@ -239,6 +239,7 @@ def _ensure_auth_config() -> None:
     """
     if os.path.exists(AUTH_CONFIG_PATH):
         return
+    os.makedirs(os.path.dirname(AUTH_CONFIG_PATH), exist_ok=True)
     config = {
         "credentials": {"usernames": {}},
         "cookie": {

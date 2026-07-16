@@ -219,16 +219,24 @@ streamlit run app.py
 
 ### Running with Docker
 
-A single image runs both processes (`server_mcp.py` in the background, then `streamlit run app.py`
-via `entrypoint.sh`, once the MCP server is reachable):
+Each process gets its own image and container, orchestrated by `docker-compose.yml`:
+
+* **`Dockerfile.mcp`** → `mcp` service (`server_mcp.py`, port 8000)
+* **`Dockerfile.app`** → `app` service (`app.py`, port 8501) — waits for `mcp`'s healthcheck to
+  pass before starting (`depends_on: condition: service_healthy`), then reaches it at
+  `http://mcp:8000/mcp` (`MCP_SERVER_URL`, set via Compose — the two containers no longer share
+  `localhost`, unlike when both processes ran in one container)
 
 ```bash
-docker build -t viromechat .
-docker run -p 8501:8501 --env-file .env.app --env-file .env.mcp viromechat
+docker compose up --build
 ```
 
-Secrets are excluded from the image by `.dockerignore` — always pass them at `docker run` time
-(`--env-file`, or individual `-e KEY=value` flags), never bake them into the image.
+Secrets are excluded from both images by `.dockerignore` — each service loads only its own
+`.env.app` / `.env.mcp` at runtime via Compose's `env_file:`, never baked into the image. Local
+accounts (`auth_data/`, i.e. `AUTH_CONFIG_PATH`) live in a named Docker volume, not the container's
+writable layer — this also sidesteps host/VM-specific UID mismatches that would otherwise turn
+account creation into a `PermissionError` on some hosts (bind mounts inherit the host filesystem's
+ownership; a named volume doesn't).
 
 
 ## ⚠️ Disclaimer

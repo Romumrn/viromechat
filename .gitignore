@@ -9,7 +9,7 @@ __pycache__/*
 .streamlit/secrets.toml
 
 # Local user accounts (usernames, bcrypt-hashed passwords, cookie key)
-.streamlit_auth.yaml
+auth_data/
 test_neo4j.ipynb
 test_S3MCP.ipynb
 .gitignore

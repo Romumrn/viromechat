@@ -1,0 +1,9 @@
+# Dependencies for the MCP data server (server_mcp.py) only — used by Dockerfile.mcp.
+# For local, non-Docker dev running both processes on one host, use the
+# combined requirements.txt instead.
+fastmcp>=3.4
+duckdb>=1.1
+pandas>=2.2
+numpy>=1.26
+plotly>=6.0
+requests>=2.32

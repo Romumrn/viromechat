@@ -1,22 +1,51 @@
-version: '3.8'
-
 services:
-  virus-ai-agent:
-    build: .
-    container_name: virus-ai-agent
-    environment:
-      - STREAMLIT_BROWSER_GATHERUSAGESTATS=false
-      - HOME=/tmp
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: virus-mcp-server
     env_file:
-      - .env.app
       - .env.mcp
     volumes:
       - ./data:/app/data:ro
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      # No curl in the slim image — a plain Python request is enough to know
+      # the MCP server is up. Gates the "app" service's startup below.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/mcp', timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    container_name: virus-ai-agent
+    environment:
+      - STREAMLIT_BROWSER_GATHERUSAGESTATS=false
+      # app.py and server_mcp.py are now separate containers — "localhost"
+      # would no longer reach the MCP server, so point it at the "mcp"
+      # service by its Compose network name instead.
+      - MCP_SERVER_URL=http://mcp:8000/mcp
+    env_file:
+      - .env.app
+    volumes:
       - ./logs:/app/logs
       - ./.streamlit:/app/.streamlit:ro
-      - /tmp:/home/app
+      # Named volume (not a host bind-mount): keeps registered accounts
+      # readable/writable by the container's non-root user and persisted
+      # across rebuilds, regardless of host-side UID/GID on a given VM.
+      - auth_data:/app/auth_data
+    ports:
+      - "8501:8501"
+    depends_on:
+      mcp:
+        condition: service_healthy
     restart: unless-stopped
-    network_mode: "host"
-    # Pas de "command:" : l'entrypoint du Dockerfile (entrypoint.sh) lance
-    # server_mcp.py (port 8000) PUIS streamlit (port 8501) — un override
-    # "streamlit run app.py" seul ne démarrerait pas le serveur MCP.
+
+volumes:
+  auth_data:
