@@ -270,14 +270,24 @@ _BLOCKED_EMAIL_DOMAINS = {
     "yandex.com", "yandex.ru", "mail.com", "zoho.com",
 }
 
-# At least 6 characters, at least one non-alphanumeric (special) character.
-_PASSWORD_HELP = "At least 6 characters, including 1 special character (e.g. ! ? @ # …)."
+# At least 12 characters, with a lowercase letter, an uppercase letter, a digit
+# and one non-alphanumeric (special) character.
+_PASSWORD_HELP = (
+    "At least 12 characters, including 1 lowercase letter, 1 uppercase letter, "
+    "1 digit and 1 special character (e.g. ! ? @ # …)."
+)
 
 
 def _password_problem(password: str) -> str | None:
     """Return a human-readable reason the password is unacceptable, or None if OK."""
-    if len(password) < 6:
-        return "Password must be at least 6 characters long."
+    if len(password) < 12:
+        return "Password must be at least 12 characters long."
+    if not re.search(r"[a-z]", password):
+        return "Password must contain at least 1 lowercase letter."
+    if not re.search(r"[A-Z]", password):
+        return "Password must contain at least 1 uppercase letter."
+    if not re.search(r"[0-9]", password):
+        return "Password must contain at least 1 digit."
     if not re.search(r"[^A-Za-z0-9]", password):
         return "Password must contain at least 1 special character (e.g. ! ? @ # …)."
     return None
@@ -297,7 +307,8 @@ def _register_user(authenticator: stauth.Authenticate) -> None:
     """
     Minimal registration form: first name, last name, institutional email
     (used as the login username — free webmail domains are rejected, see
-    _BLOCKED_EMAIL_DOMAINS), password (min 6 chars + 1 special character),
+    _BLOCKED_EMAIL_DOMAINS), password (min 12 chars, mixed case + digit +
+    1 special character),
     and — when a REGISTRATION_CODE secret is configured — a shared invite
     code (the main anti-bot gate). No separate username, no repeat-password.
 

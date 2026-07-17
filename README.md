@@ -126,15 +126,15 @@ external identity provider, no email service — built on top of
 [`streamlit-authenticator`](https://github.com/mkhorasani/Streamlit-Authenticator) for login,
 session cookies, and credential storage, with a custom minimal registration form:
 
-* **Registration** — first name, last name, institutional email, password, and a captcha (to deter
-  bot sign-ups). No separate username (the email doubles as one), no repeat-password field.
-  Validated at submit: the password must be **at least 6 characters and contain 1 special
-  character** (shown as a hint under the field), and the email domain must **not** be a free
-  webmail provider (Gmail, Outlook, Yahoo, iCloud, Proton, Orange, … — see `_BLOCKED_EMAIL_DOMAINS`
-  in `app.py`). This is a quick blocklist, not a real institution allowlist — someone with their
-  own custom domain still gets through, the goal is just to steer people to their work address.
-  Self-service and collapsed by default: anyone who can reach the app can register, but the form
-  only expands once someone clicks "Create an account".
+* **Registration** — first name, last name, institutional email, and password. No separate
+  username (the email doubles as one), no repeat-password field. Validated at submit: the password
+  must be **at least 6 characters and contain 1 special character** (shown as a hint under the
+  field), and the email domain must **not** be a free webmail provider (Gmail, Outlook, Yahoo,
+  iCloud, Proton, Orange, … — see `_BLOCKED_EMAIL_DOMAINS` in `app.py`). This is a quick blocklist,
+  not a real institution allowlist — someone with their own custom domain still gets through, the
+  goal is just to steer people to their work address. Self-service and collapsed by default: anyone
+  who can reach the app can register, but the form only expands once someone clicks "Create an
+  account".
 * **Optional invite code** — set `REGISTRATION_CODE` in `.env.app` (or `.streamlit/secrets.toml`)
   to gate registration behind a shared code: an extra "Registration code" field appears and must
   match before an account is created. Leave it unset to keep registration open. The expected value
