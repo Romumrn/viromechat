@@ -300,6 +300,30 @@ def taxonomy_schema_resource() -> str:
     return json.dumps(taxo_col_descriptions, ensure_ascii=False)
 
 
+@mcp.resource(
+    "resource://project/virometlas",
+    name="Virome@tlas project context",
+    description=(
+        "Background on the Virome@tlas research initiative this tool supports — what it is, "
+        "who runs it, and its official project page. Read this if a user asks what Virome@tlas "
+        "is, who's behind it, or wants a link to the project."
+    ),
+    mime_type="text/plain",
+)
+def virometlas_context_resource() -> str:
+    return (
+        "Virome@tlas is a structuring research initiative led by SHAPE-Med@Lyon. It aims to "
+        "build an integrated digital platform for large-scale exploration and surveillance of "
+        "the global virosphere, leveraging publicly available sequencing data to analyze virus "
+        "diversity, virus-host interactions, and ecological distribution patterns within a "
+        "transdisciplinary One Health framework spanning human, animal, and environmental "
+        "health.\n\n"
+        "This chatbot (Viromech@t) is a research companion tool built on top of Virome@tlas's "
+        "curated datasets (taxonomy and virus-host occurrences).\n\n"
+        "Official project page: https://www.shape-med-lyon.fr/projets/structurants-vague-1/virometlas/"
+    )
+
+
 # ==================== MCP TOOLS ==================== #
 
 @mcp.tool
