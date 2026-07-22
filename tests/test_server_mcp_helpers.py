@@ -65,6 +65,30 @@ def test_check_hover_has_column_false_when_column_missing():
     assert sm._check_hover_has_column(fig, "COUNTRY") is False
 
 
+# ==================== _check_hover_column_has_no_missing_values ====================
+
+def test_check_hover_column_no_missing_values_true_when_all_present():
+    df = pd.DataFrame({"x": [1, 2], "y": [3, 4], "sample_id": ["SAMN001", "ON871047.1"]})
+    fig = px.scatter(df, x="x", y="y", hover_data=["sample_id"])
+    assert sm._check_hover_column_has_no_missing_values(fig, "sample_id") is True
+
+
+def test_check_hover_column_no_missing_values_false_when_some_null():
+    # a sample with neither a BioSample nor a GenBank accession — must not
+    # silently show up on the map
+    df = pd.DataFrame({"x": [1, 2, 3], "y": [3, 4, 5], "sample_id": ["SAMN001", None, "ON871047.1"]})
+    fig = px.scatter(df, x="x", y="y", hover_data=["sample_id"])
+    assert sm._check_hover_column_has_no_missing_values(fig, "sample_id") is False
+
+
+def test_check_hover_column_no_missing_values_true_when_column_absent():
+    # nothing to check if the column isn't in hover_data at all — that's
+    # _check_hover_has_column's job to catch
+    df = pd.DataFrame({"x": [1, 2], "y": [3, 4]})
+    fig = px.scatter(df, x="x", y="y")
+    assert sm._check_hover_column_has_no_missing_values(fig, "sample_id") is True
+
+
 # ==================== _check_data_not_empty ====================
 
 def test_check_data_not_empty_returns_none_when_no_dataframe_present():

@@ -188,6 +188,34 @@ def _check_hover_has_column(fig: go.Figure, column: str) -> bool:
     return False
 
 
+def _check_hover_column_has_no_missing_values(fig: go.Figure, column: str) -> bool:
+    """
+    Returns True if every plotted point has a non-null value for `column`.
+
+    `_check_hover_has_column` only proves the column was *included* in
+    hover_data — a row whose `column` value is NULL still passes that check
+    (Plotly happily renders "column=None" in the hover box). This walks each
+    trace's actual customdata to catch that case: e.g. create_map uses this
+    on 'sample_id' to catch a point that can't be traced back to a sample
+    because the value is missing in the source data, not because the
+    query/code forgot to select it.
+    """
+    for trace in fig.data:
+        tmpl = getattr(trace, "hovertemplate", None)
+        customdata = getattr(trace, "customdata", None)
+        if not tmpl or customdata is None:
+            continue
+        match = re.search(re.escape(column) + r'=%\{customdata\[(\d+)\]\}', tmpl)
+        if not match:
+            continue
+        idx = int(match.group(1))
+        for row in customdata:
+            value = row[idx]
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return False
+    return True
+
+
 def _check_data_not_empty(env: dict):
     """
     After exec(), inspect variables named 'data'/'result'/etc. in env.
@@ -620,13 +648,18 @@ def query_host_sql(sql: str, preview_rows: int = DEFAULT_PREVIEW_ROWS) -> dict:
         LIMIT 10000
 
         -- Rows for create_map (coordinates MUST be extracted like this;
-        -- primary_id MUST always be included — it's the sample identifier
-        -- create_map requires in hover_data)
+        -- sample_id MUST always be included — it's the sample identifier
+        -- create_map requires in hover_data. primary_id (BioSample accession)
+        -- is NULL on a large fraction of rows — secondary_id (GenBank/
+        -- Nucleotide accession) is populated on every single one of those,
+        -- so COALESCE gives a traceable ID for ~100% of rows instead of
+        -- silently dropping every sample that only has a GenBank accession)
         #Here we want to get the coordinates of all host-virus observations for the Poxviridae family,
         # but we only want the first 50,000 rows to avoid overloading the system.
         # We also want to make sure that we only include rows where the geometry is not null, since we can't map points without coordinates.
         SELECT ST_X(geometry) AS lon, ST_Y(geometry) AS lat,
-               primary_id, VIRUS_SPECIES, HOST_TAX_NAME, COUNTRY
+               COALESCE(primary_id, secondary_id) AS sample_id,
+               VIRUS_SPECIES, HOST_TAX_NAME, COUNTRY
         FROM host
         WHERE VIRUS_FAMILY ILIKE '%poxviridae%' AND geometry IS NOT NULL
         LIMIT 50000
@@ -819,17 +852,23 @@ def create_map(code: str) -> dict:
     with that extraction before using this tool.
 
     MANDATORY — sample identifier: every point plotted MUST be traceable back
-    to its exact sample. Your preceding query_host_sql call MUST SELECT
-    `primary_id` (the BioSample accession), and `primary_id` MUST be included
-    in `hover_data` below. A map without it will be REJECTED.
+    to its exact sample. `primary_id` (BioSample accession) is NULL on a large
+    fraction of rows, but on every single one of those `secondary_id` (GenBank/
+    Nucleotide accession, e.g. 'ON871047.1') is populated instead — so your
+    preceding query_host_sql call MUST SELECT `COALESCE(primary_id,
+    secondary_id) AS sample_id` (never bare `primary_id` alone, that silently
+    excludes every GenBank-only sample), and `sample_id` MUST be included in
+    `hover_data` below. A map without it will be REJECTED.
 
     EXACT TEMPLATE TO FOLLOW (mandatory, adapt only the title and any
-    extra narrowing — but NEVER drop primary_id from hover_data):
-        data = df_host.dropna(subset=['lat', 'lon'])
+    extra narrowing — but NEVER drop sample_id from hover_data). Note the
+    dropna also includes sample_id: a point with neither a BioSample nor a
+    GenBank accession cannot be traced back to a sample and must not be shown.
+        data = df_host.dropna(subset=['lat', 'lon', 'sample_id'])
         fig = px.scatter_mapbox(
             data, lat='lat', lon='lon',
             hover_name='VIRUS_SPECIES',
-            hover_data=['primary_id', 'HOST_TAX_NAME', 'COUNTRY'],
+            hover_data=['sample_id', 'HOST_TAX_NAME', 'COUNTRY'],
             color='VIRUS_SPECIES',
             zoom=1, title='TITLE'
         )
@@ -879,13 +918,22 @@ def create_map(code: str) -> dict:
                 "resource://datasets/host/schema resource to inspect what columns exist."
             )
 
-        if not _check_hover_has_column(fig, "primary_id"):
+        if not _check_hover_has_column(fig, "sample_id"):
             return _fail(
-                "Error: the map is missing the sample identifier (primary_id) — every "
-                "point MUST be traceable back to its exact BioSample sample. Fix BOTH: "
-                "1) your query_host_sql SELECT must include primary_id, and "
-                "2) hover_data=[...] in px.scatter_mapbox must include 'primary_id'. "
-                "Retry create_map with primary_id in hover_data."
+                "Error: the map is missing the sample identifier (sample_id) — every "
+                "point MUST be traceable back to its exact sample. Fix BOTH: "
+                "1) your query_host_sql SELECT must include "
+                "COALESCE(primary_id, secondary_id) AS sample_id, and "
+                "2) hover_data=[...] in px.scatter_mapbox must include 'sample_id'. "
+                "Retry create_map with sample_id in hover_data."
+            )
+
+        if not _check_hover_column_has_no_missing_values(fig, "sample_id"):
+            return _fail(
+                "Error: some plotted points have a missing (null) sample_id — those "
+                "samples have neither a BioSample nor a GenBank accession and cannot "
+                "be traced back to a sample. Retry create_map, filtering them out "
+                "first, e.g.: data = df_host.dropna(subset=['lat', 'lon', 'sample_id'])"
             )
 
         title = _figure_title(fig)
