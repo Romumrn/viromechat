@@ -2,7 +2,7 @@ services:
   mcp:
     build:
       context: .
-      dockerfile: Dockerfile.mcp
+      dockerfile: docker/Dockerfile.mcp
     container_name: virus-mcp-server
     env_file:
       - .env.mcp
@@ -40,7 +40,7 @@ services:
   app:
     build:
       context: .
-      dockerfile: Dockerfile.app
+      dockerfile: docker/Dockerfile.app
     container_name: virus-ai-agent
     environment:
       - STREAMLIT_BROWSER_GATHERUSAGESTATS=false

@@ -1,0 +1,7 @@
+# Dependencies for the Streamlit client (app.py) only — used by docker/Dockerfile.app.
+# For local, non-Docker dev running both processes on one host, use the
+# combined requirements/all.txt instead.
+-r base.txt
+streamlit>=1.53
+streamlit-authenticator>=0.4,<0.5
+PyYAML>=6.0

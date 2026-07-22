@@ -179,8 +179,13 @@ client code change.
 * Python packages (`streamlit>=1.53` is required for the native microphone button in the chat input):
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements/all.txt
 ```
+
+  Dependencies are split per process under [`requirements/`](requirements/) — `app.txt` for
+  `app.py`, `mcp.txt` for `server_mcp.py`, both pulling shared packages from `base.txt`. `all.txt`
+  combines both for local, non-Docker dev running both processes on one host; `dev.txt` adds
+  `pytest` for the [test suite](#testing).
 
 ### Configuration
 
@@ -235,8 +240,8 @@ streamlit run app.py
 
 Each process gets its own image and container, orchestrated by `docker-compose.yml`:
 
-* **`Dockerfile.mcp`** → `mcp` service (`server_mcp.py`, port 8000)
-* **`Dockerfile.app`** → `app` service (`app.py`, port 8501) — waits for `mcp`'s healthcheck to
+* **`docker/Dockerfile.mcp`** → `mcp` service (`server_mcp.py`, port 8000)
+* **`docker/Dockerfile.app`** → `app` service (`app.py`, port 8501) — waits for `mcp`'s healthcheck to
   pass before starting (`depends_on: condition: service_healthy`), then reaches it at
   `http://mcp:8000/mcp` (`MCP_SERVER_URL`, set via Compose — the two containers no longer share
   `localhost`, unlike when both processes ran in one container)
@@ -254,7 +259,7 @@ its contents gitignored) so it exists before the first run.
 
 Because a bind-mount keeps the host directory's ownership — which may not match the container's
 non-root `app` user (uid 1000) and would otherwise cause `PermissionError: … auth_data/…` — the
-app container starts from an entrypoint (`entrypoint-app.sh`) that runs briefly as root to
+app container starts from an entrypoint (`docker/entrypoint-app.sh`) that runs briefly as root to
 `chown` the mounted `auth_data/` and `logs/` to the app user, then drops privileges (via `gosu`)
 to run Streamlit as `app`. So account creation works regardless of host-side ownership, no manual
 `chown` needed.
@@ -267,7 +272,7 @@ citation/PMID guardrails, SQL validation, table/figure formatting, ...) — see 
 in CI on every push and pull request to `main` (see `.github/workflows/ci.yml`).
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
+pip install -r requirements/all.txt -r requirements/dev.txt
 pytest
 ```
 

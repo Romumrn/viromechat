@@ -1,0 +1,7 @@
+# Dependencies for the MCP data server (server_mcp.py) only — used by docker/Dockerfile.mcp.
+# For local, non-Docker dev running both processes on one host, use the
+# combined requirements/all.txt instead.
+-r base.txt
+duckdb>=1.1
+pandas>=2.2
+numpy>=1.26

@@ -1,9 +1,0 @@
-# Dependencies for the Streamlit client (app.py) only — used by Dockerfile.app.
-# For local, non-Docker dev running both processes on one host, use the
-# combined requirements.txt instead.
-streamlit>=1.53
-streamlit-authenticator>=0.4,<0.5
-fastmcp>=3.4
-plotly>=6.0
-requests>=2.32
-PyYAML>=6.0
