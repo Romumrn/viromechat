@@ -818,6 +818,7 @@ async def albert_agent_loop(
     model: str,
     api_key: str,
     user_query: str,
+    username: str = "",
     temperature: float = DEFAULT_TEMPERATURE,
     top_p: float = DEFAULT_TOP_P,
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
@@ -843,6 +844,12 @@ async def albert_agent_loop(
     turns in this conversation, replayed before the new user_query so the
     model has full context of earlier questions, its own tool calls, and
     their results.
+
+    username (the user's email) is only used to tag the USER_QUERY log line
+    so every question can be traced back to who asked it — this log line is
+    written to disk unconditionally, independent of the user's own session
+    history, so it survives even after that user clears their history (see
+    the "Clear my history" button in main()).
 
     The loop continues until:
     - The model returns a final answer (no tool calls)
@@ -874,7 +881,7 @@ async def albert_agent_loop(
         status_container.write(f"{prefix} {icon} {label}{'…' if ok is None else ''}{suffix}")
 
     logger.info("=" * 50)
-    logger.info(f"USER_QUERY | {user_query}")
+    logger.info(f"USER_QUERY | user={username or 'unknown'} | {user_query}")
     logger.info(
         f"CONFIG | model={model} temp={temperature} top_p={top_p} "
         f"max_calls={max_tool_calls} preview={preview_rows}rows "
@@ -1285,6 +1292,7 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
             model_names = _list_albert_models(api_key)
 
         if st.button("🗑️ Clear my history"):
+            logger.info(f"HISTORY_CLEARED | user={username}")
             st.session_state.messages = []
             st.session_state.conversation_messages = []
             st.session_state.context_turn_count = 0
@@ -1414,6 +1422,7 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
                     model=model,
                     api_key=api_key,
                     user_query=query,
+                    username=username,
                     temperature=temperature,
                     top_p=top_p,
                     max_tool_calls=max_tool_calls,
