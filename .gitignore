@@ -1,7 +1,9 @@
 .DS_Store
 logs/*
 data*
-__pycache__/*
+**/__pycache__/
+.pytest_cache/
+.claude/
 # Secrets — see .env.app.example / .env.mcp.example for the expected keys
 .env
 .env.app

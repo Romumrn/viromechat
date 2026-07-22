@@ -1,5 +1,9 @@
 # 🦠 Viromech@t — Virus Dataset AI Agent
 
+[![CI](https://github.com/Romumrn/viromechat/actions/workflows/ci.yml/badge.svg)](https://github.com/Romumrn/viromechat/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/tag/Romumrn/viromechat?label=release)](https://github.com/Romumrn/viromechat/tags)
+
 A conversational agent for exploring viral taxonomy and virus–host data, built on a strict
 tool-calling architecture: the LLM never sees raw data directly, it can only act through a
 small set of audited tools exposed by a separate [MCP server](README_MCP.md).
@@ -255,6 +259,17 @@ app container starts from an entrypoint (`entrypoint-app.sh`) that runs briefly 
 to run Streamlit as `app`. So account creation works regardless of host-side ownership, no manual
 `chown` needed.
 
+
+## Testing
+
+Unit tests cover the pure helper logic in `app.py` and `server_mcp.py` (argument parsing,
+citation/PMID guardrails, SQL validation, table/figure formatting, ...) — see `tests/`. They run
+in CI on every push and pull request to `main` (see `.github/workflows/ci.yml`).
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest
+```
 
 ## ⚠️ Disclaimer
 
