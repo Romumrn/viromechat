@@ -27,8 +27,24 @@ MCP_ENV_PATH = ".env.mcp"
 # directory) so it can be given its own persistent volume in Docker — see
 # docker-compose.yml — without also having to bind-mount the whole app
 # directory just to make this one file survive a container rebuild.
-AUTH_CONFIG_PATH  = os.path.join("auth_data", ".streamlit_auth.yaml")  # local accounts (usernames, hashed passwords, cookie key)
-USER_HISTORY_DIR  = os.path.join(LOG_DIR, "user_histories")  # one JSON file per user, their chat history
+AUTH_CONFIG_PATH  = os.path.join("auth_data", ".streamlit_auth.yaml")  # legacy local accounts (migrated into DB_PATH on first run)
+USER_HISTORY_DIR  = os.path.join(LOG_DIR, "user_histories")  # legacy per-user chat JSON (migrated into DB_PATH on first run)
+
+# Single SQLite database holding users (email, bcrypt hash, role), their
+# conversations and messages, plus a little app_meta (the streamlit-authenticator
+# cookie config). Lives alongside AUTH_CONFIG_PATH in the already-persistent
+# auth_data/ Docker volume. The legacy YAML + per-user JSON files above are
+# imported into it once (see db.maybe_migrate_legacy_data) and then left alone.
+DB_PATH = os.path.join("auth_data", "viromechat.db")
+
+
+def _admin_emails() -> set[str]:
+    """Emails granted the 'admin' role, from the ADMIN_EMAILS secret/env
+    (comma-separated). Read lazily so tests and the app can set it via env.
+    Matching is case-insensitive — emails double as usernames and are stored
+    lower-cased (see _register_user in app.py)."""
+    raw = os.environ.get("ADMIN_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
 def load_env_file(env_path: str) -> None:

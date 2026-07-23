@@ -209,6 +209,42 @@ def test_password_problem_accepts_valid_password():
     assert app._password_problem("Valid-Password123") is None
 
 
+# ==================== _password_checklist ====================
+
+def test_password_checklist_all_false_for_empty_password():
+    checklist = app._password_checklist("")
+    assert len(checklist) == len(app._PASSWORD_RULES)
+    assert all(ok is False for _label, ok in checklist)
+
+
+def test_password_checklist_all_true_for_valid_password():
+    checklist = app._password_checklist("Valid-Password123")
+    assert all(ok is True for _label, ok in checklist)
+
+
+def test_password_checklist_mixed_results_match_password_problem():
+    password = "nouppercase123!"  # missing only the uppercase rule
+    checklist = dict(app._password_checklist(password))
+    assert checklist["1 uppercase letter"] is False
+    assert checklist["At least 12 characters"] is True
+    assert checklist["1 lowercase letter"] is True
+    assert checklist["1 digit"] is True
+    # _password_problem stops at the first failing rule (uppercase, in
+    # rule order) — the checklist must agree on which one that is
+    assert "uppercase" in app._password_problem(password)
+
+
+def test_password_checklist_labels_are_stable_and_ordered():
+    labels = [label for label, _ok in app._password_checklist("x")]
+    assert labels == [
+        "At least 12 characters",
+        "1 lowercase letter",
+        "1 uppercase letter",
+        "1 digit",
+        "1 special character (e.g. ! ? @ # …)",
+    ]
+
+
 # ==================== _parse_tool_arguments ====================
 
 def test_parse_tool_arguments_passes_through_dict():
@@ -269,20 +305,43 @@ def test_clean_history_messages_drops_system_messages():
     assert cleaned == [{"role": "user", "content": "hi"}]
 
 
-# ==================== _user_history_path ====================
+# ==================== build_context_window ====================
 
-def test_user_history_path_sanitizes_unsafe_characters(tmp_path, monkeypatch):
-    monkeypatch.setattr(app, "USER_HISTORY_DIR", str(tmp_path))
-    path = app._user_history_path("weird/name:with*chars@example.com")
-    assert path.endswith(".json")
-    # unsafe characters replaced with underscores, dots/dashes/underscores kept
-    assert os.path.basename(path) == "weird_name_with_chars_example.com.json"
+def _exchanges(n):
+    """n user/assistant exchanges as display-shape messages."""
+    msgs = []
+    for i in range(1, n + 1):
+        msgs.append({"role": "user", "content": f"q{i}"})
+        msgs.append({"role": "assistant", "content": f"a{i}"})
+    return msgs
 
 
-def test_user_history_path_creates_directory(tmp_path, monkeypatch):
-    target_dir = tmp_path / "user_histories"
-    monkeypatch.setattr(app, "USER_HISTORY_DIR", str(target_dir))
+def test_build_context_window_keeps_last_n_turns():
+    window = app.build_context_window(_exchanges(5), max_turns=2)
+    assert [(m["role"], m["content"]) for m in window] == [
+        ("user", "q4"), ("assistant", "a4"),
+        ("user", "q5"), ("assistant", "a5"),
+    ]
 
-    app._user_history_path("someone@example.com")
 
-    assert target_dir.exists()
+def test_build_context_window_shorter_than_limit_returns_all():
+    window = app.build_context_window(_exchanges(2), max_turns=5)
+    assert len(window) == 4
+
+
+def test_build_context_window_zero_turns_returns_all():
+    # max_turns <= 0 disables the slice (full history sent)
+    assert len(app.build_context_window(_exchanges(3), max_turns=0)) == 6
+
+
+def test_build_context_window_strips_rich_fields_and_figures():
+    messages = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1", "figures": ["<fig>"], "wikipedia_urls": ["u"]},
+    ]
+    window = app.build_context_window(messages, max_turns=5)
+    # only role/content survive into the prompt — no figures/urls
+    assert window == [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+    ]

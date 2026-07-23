@@ -21,20 +21,20 @@ import json
 import logging
 import time
 import re
-import secrets
-import yaml
 from datetime import datetime
 
+import bcrypt
 import plotly.io as pio
 from fastmcp import Client
 import streamlit_authenticator as stauth
 
 # Local imports
+import db
 from prompt import build_system_prompt
 from config import (
     ALBERT_BASE_URL, ALBERT_TIMEOUT, ALBERT_MODEL_DEFAULT, ALBERT_WHISPER_MODEL,
     LOG_DIR, MCP_SERVER_URL, APP_ENV_PATH,
-    AUTH_CONFIG_PATH, USER_HISTORY_DIR,
+    _admin_emails,
     PAGE_TITLE, PAGE_ICON, GITHUB_URL,
     DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_PRESENCE_PENALTY,
     DEFAULT_FREQUENCY_PENALTY,
@@ -49,8 +49,8 @@ from logging_utils import setup_logger
 
 # Local dev secrets (ALBERT_API_KEY) — see .env.app.example. On Streamlit
 # Community Cloud, st.secrets is used instead and always takes priority (see
-# _get_secret below). Account credentials themselves live in AUTH_CONFIG_PATH
-# (gitignored), not in this file — see the ACCOUNTS section.
+# _get_secret below). Account credentials themselves live in the SQLite
+# database (config.DB_PATH), not in this file — see the ACCOUNTS section.
 load_env_file(APP_ENV_PATH)
 
 
@@ -221,35 +221,18 @@ def _get_secret(key: str, default: str = "") -> str:
 # ==================== ACCOUNTS (local, no external IdP) ====================
 #
 # A user account is required to use this app — there is no guest mode.
-# Accounts are backed by a local YAML file (AUTH_CONFIG_PATH, gitignored)
-# via streamlit-authenticator: bcrypt-hashed passwords and a signed re-auth
-# cookie, no external identity provider and no email service. The email
-# address doubles as the username (login asks for "Email", not a separate
-# username) — registration itself is a minimal, purpose-built form (see
-# _register_user below), not streamlit-authenticator's own register_user()
-# widget, which insists on a separate username and a repeat-password field
-# this app doesn't want. Bot sign-ups are deterred by the optional shared
+# Accounts live in the SQLite database (db.py): bcrypt-hashed passwords and a
+# signed re-auth cookie via streamlit-authenticator, no external identity
+# provider and no email service. streamlit-authenticator stays the crypto /
+# cookie / session engine — it's fed a credentials dict built from the users
+# table (db.build_credentials_dict) rather than reading a YAML file, and the
+# cookie signing key lives in the app_meta table (db.get_cookie_config).
+# The email address doubles as the username (login asks for "Email", not a
+# separate username) — registration itself is a minimal, purpose-built form
+# (see _register_user below), not streamlit-authenticator's own register_user()
+# widget, which insists on a separate username and a repeat-password field this
+# app doesn't want. Bot sign-ups are deterred by the optional shared
 # REGISTRATION_CODE gate rather than a captcha.
-
-def _ensure_auth_config() -> None:
-    """
-    Create AUTH_CONFIG_PATH on first run: no users yet, and a freshly
-    generated random cookie-signing key. Without this, streamlit-authenticator
-    has nothing to read on a brand-new checkout.
-    """
-    if os.path.exists(AUTH_CONFIG_PATH):
-        return
-    os.makedirs(os.path.dirname(AUTH_CONFIG_PATH), exist_ok=True)
-    config = {
-        "credentials": {"usernames": {}},
-        "cookie": {
-            "name": "viromechat_auth",
-            "key": secrets.token_hex(32),
-            "expiry_days": 30,
-        },
-    }
-    with open(AUTH_CONFIG_PATH, "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
 
 
 # Free / consumer email providers rejected at registration: this app is meant
@@ -278,19 +261,39 @@ _PASSWORD_HELP = (
 )
 
 
+# Each rule: (predicate, error message for _password_problem, short label for
+# the live checklist shown while the user types — see _password_checklist).
+_PASSWORD_RULES = [
+    (lambda p: len(p) >= 12,
+     "Password must be at least 12 characters long.",
+     "At least 12 characters"),
+    (lambda p: re.search(r"[a-z]", p) is not None,
+     "Password must contain at least 1 lowercase letter.",
+     "1 lowercase letter"),
+    (lambda p: re.search(r"[A-Z]", p) is not None,
+     "Password must contain at least 1 uppercase letter.",
+     "1 uppercase letter"),
+    (lambda p: re.search(r"[0-9]", p) is not None,
+     "Password must contain at least 1 digit.",
+     "1 digit"),
+    (lambda p: re.search(r"[^A-Za-z0-9]", p) is not None,
+     "Password must contain at least 1 special character (e.g. ! ? @ # …).",
+     "1 special character (e.g. ! ? @ # …)"),
+]
+
+
 def _password_problem(password: str) -> str | None:
     """Return a human-readable reason the password is unacceptable, or None if OK."""
-    if len(password) < 12:
-        return "Password must be at least 12 characters long."
-    if not re.search(r"[a-z]", password):
-        return "Password must contain at least 1 lowercase letter."
-    if not re.search(r"[A-Z]", password):
-        return "Password must contain at least 1 uppercase letter."
-    if not re.search(r"[0-9]", password):
-        return "Password must contain at least 1 digit."
-    if not re.search(r"[^A-Za-z0-9]", password):
-        return "Password must contain at least 1 special character (e.g. ! ? @ # …)."
+    for check, message, _label in _PASSWORD_RULES:
+        if not check(password):
+            return message
     return None
+
+
+def _password_checklist(password: str) -> list[tuple[str, bool]]:
+    """Per-rule (label, is_satisfied) pairs, for live feedback while the user
+    types — see _password_problem for the same rules used as a hard gate."""
+    return [(label, check(password)) for check, _msg, label in _PASSWORD_RULES]
 
 
 # Session flag that keeps the "Create an account" expander open across the
@@ -303,7 +306,7 @@ def _keep_register_open() -> None:
     st.session_state[_REGISTER_OPEN_KEY] = True
 
 
-def _register_user(authenticator: stauth.Authenticate) -> None:
+def _register_user(conn) -> None:
     """
     Minimal registration form: first name, last name, institutional email
     (used as the login username — free webmail domains are rejected, see
@@ -312,9 +315,9 @@ def _register_user(authenticator: stauth.Authenticate) -> None:
     and — when a REGISTRATION_CODE secret is configured — a shared invite
     code (the main anti-bot gate). No separate username, no repeat-password.
 
-    Writes straight into AUTH_CONFIG_PATH the same way streamlit-authenticator
-    itself persists credentials, via the live Authenticate instance's own
-    credentials dict so a login right after registering sees it immediately.
+    Writes the new account straight into the users table (db.create_user) with
+    a bcrypt-hashed password. authenticate() rebuilds its credentials dict from
+    the DB on the next rerun, so a login right after registering sees it.
     """
     # Shared registration code (invite gate): when REGISTRATION_CODE is set in
     # the secrets/.env.app, a matching code is required to create an account,
@@ -323,8 +326,24 @@ def _register_user(authenticator: stauth.Authenticate) -> None:
     # in the source — always read from the secret.
     expected_code = _get_secret("REGISTRATION_CODE", "").strip()
 
+    st.subheader("Create an account")
+
+    # The password field deliberately lives OUTSIDE any st.form: widgets
+    # inside a form only trigger a rerun (and thus only refresh whatever
+    # depends on them) when the form is submitted — so a live "requirements
+    # met" checklist below it would just sit frozen until the user clicks
+    # Register. Left as a plain widget, Streamlit reruns on every blur/Enter,
+    # updating the checklist as the user types instead of only after a failed
+    # submit. The rest of the fields stay in a form purely for the Enter-to-
+    # submit convenience, which doesn't depend on live feedback the same way.
+    password = st.text_input("Password", type="password", key="register_password", help=_PASSWORD_HELP)
+    if password:
+        for label, ok in _password_checklist(password):
+            st.caption(f"{'✅' if ok else '❌'} {label}")
+    else:
+        st.caption(f"🔒 {_PASSWORD_HELP}")
+
     with st.form("register_form", clear_on_submit=True):
-        st.subheader("Create an account")
         col1, col2 = st.columns(2)
         first_name = col1.text_input("First name")
         last_name = col2.text_input("Last name")
@@ -333,8 +352,6 @@ def _register_user(authenticator: stauth.Authenticate) -> None:
             help="Use your university / research institution address — free webmail "
                  "(Gmail, Outlook, Yahoo, …) is not accepted.",
         )
-        password = st.text_input("Password", type="password", help=_PASSWORD_HELP)
-        st.caption(f"🔒 {_PASSWORD_HELP}")
         entered_code = ""
         if expected_code:
             entered_code = st.text_input(
@@ -377,39 +394,45 @@ def _register_user(authenticator: stauth.Authenticate) -> None:
         st.error(pwd_problem)
         return
 
-    credentials = authenticator.authentication_controller.authentication_model.credentials
-    if email in credentials["usernames"]:
+    if db.get_user(conn, email) is not None:
         st.error("An account with this email already exists.")
         return
 
-    credentials["usernames"][email] = {
-        "email": email,
-        "first_name": first_name,
-        "last_name": last_name,
-        "password": stauth.Hasher.hash(password),
-        "logged_in": False,
-        "roles": None,
-    }
-    stauth.Helpers.update_config_file(AUTH_CONFIG_PATH, "credentials", credentials)
+    # Grant admin to emails listed in the ADMIN_EMAILS secret; everyone else is
+    # a regular user. Same rule the legacy-data migration applies (see db.py).
+    role = "admin" if email in _admin_emails() else "user"
+    db.create_user(conn, email, first_name, last_name, stauth.Hasher.hash(password), role)
     st.success(f"Account created for {email} — you can log in above now.")
     logger.info(f"AUTH | New account registered | email={email}")
     # Registration done — let the expander collapse again on the next rerun.
     st.session_state[_REGISTER_OPEN_KEY] = False
+    # Password lives outside register_form (see above), so clear_on_submit
+    # doesn't reach it — clear it explicitly. This run already rendered the
+    # field with its old value before we got here, so it visually empties on
+    # the next rerun, same one-run lag as the checklist itself.
+    st.session_state.pop("register_password", None)
 
 
-def authenticate() -> tuple[str, str, "stauth.Authenticate"]:
+def authenticate(conn) -> tuple[str, str, str, "stauth.Authenticate"]:
     """
     Render the login / account-creation UI and block the rest of the app
     (st.stop()) until the user is authenticated — every user of this app
     needs an account, there is no guest mode.
 
-    Returns (username, display_name, authenticator) for the logged-in user
-    — username is the user's email address. The authenticator is handed
-    back so the caller can place the logout button whereever it belongs in
-    its own layout, instead of it being forced to the top of the page here.
+    Credentials come from the SQLite users table (db.build_credentials_dict)
+    and the cookie config from app_meta (db.get_cookie_config); auto_hash is
+    off because passwords are always stored already bcrypt-hashed.
+
+    Returns (username, display_name, role, authenticator) for the logged-in
+    user — username is the user's email address. The authenticator is handed
+    back so the caller can place the logout button wherever it belongs in its
+    own layout.
     """
-    _ensure_auth_config()
-    authenticator = stauth.Authenticate(AUTH_CONFIG_PATH)
+    credentials = db.build_credentials_dict(conn)
+    cookie_name, cookie_key, cookie_expiry = db.get_cookie_config(conn)
+    authenticator = stauth.Authenticate(
+        credentials, cookie_name, cookie_key, cookie_expiry, auto_hash=False
+    )
 
     if not st.session_state.get("authentication_status"):
         # A brand-new browser session doesn't know yet whether a valid
@@ -421,81 +444,59 @@ def authenticate() -> tuple[str, str, "stauth.Authenticate"]:
 
     auth_status = st.session_state.get("authentication_status")
 
-    if auth_status:
-        return st.session_state["username"], st.session_state["name"], authenticator
+    if not auth_status:
+        st.title("Access Required")
 
-    st.title("Access Required")
+        try:
+            authenticator.login(fields={"Username": "Email"})
+        except stauth.LoginError as e:
+            st.error(str(e))
 
-    try:
-        authenticator.login(fields={"Username": "Email"})
-    except stauth.LoginError as e:
-        st.error(str(e))
+        auth_status = st.session_state.get("authentication_status")
 
-    auth_status = st.session_state.get("authentication_status")
+    if not auth_status:
+        if auth_status is False:
+            st.error("Incorrect email or password")
+            logger.warning("AUTH | Failed login attempt")
 
-    if auth_status:
-        return st.session_state["username"], st.session_state["name"], authenticator
+        with st.expander("Create an account", expanded=st.session_state.get(_REGISTER_OPEN_KEY, False)):
+            _register_user(conn)
 
-    if auth_status is False:
-        st.error("Incorrect email or password")
-        logger.warning("AUTH | Failed login attempt")
+        st.stop()
 
-    with st.expander("Create an account", expanded=st.session_state.get(_REGISTER_OPEN_KEY, False)):
-        _register_user(authenticator)
+    username = st.session_state["username"]
+    display_name = st.session_state["name"]
 
-    st.stop()
+    # Stamp last_login once per browser session (not on every rerun).
+    if not st.session_state.get("_last_login_recorded"):
+        db.set_last_login(conn, username)
+        st.session_state["_last_login_recorded"] = True
 
-
-# ==================== PER-USER HISTORY PERSISTENCE ====================
-#
-# Each account's chat history (questions, answers, and the raw Albert-format
-# context) is saved to its own JSON file so it survives page reloads and new
-# logins — not just kept in the current browser session.
-
-def _user_history_path(username: str) -> str:
-    os.makedirs(USER_HISTORY_DIR, exist_ok=True)
-    safe_username = re.sub(r"[^a-zA-Z0-9_.-]", "_", username)
-    return os.path.join(USER_HISTORY_DIR, f"{safe_username}.json")
+    role = (db.get_user(conn, username) or {}).get("role", "user")
+    return username, display_name, role, authenticator
 
 
-def _load_user_history(username: str) -> dict:
-    """Load a user's persisted history, rehydrating Plotly figures (stored
-    as JSON) back into Figure objects for display."""
-    empty = {"messages": [], "conversation_messages": [], "context_turn_count": 0}
-    path = _user_history_path(username)
-    if not os.path.exists(path):
-        return empty
-    try:
-        with open(path, "r") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning(f"USER_HISTORY_LOAD_FAIL | {username} | {e}")
-        return empty
+# ==================== CONVERSATION CONTEXT WINDOW ====================
 
-    for msg in data.get("messages", []):
-        msg["figures"] = [pio.from_json(fig_json) for fig_json in msg.get("figures", [])]
-    return data
+def build_context_window(messages: list, max_turns: int) -> list:
+    """
+    From a conversation's full on-screen history, build the bounded message
+    list replayed to Albert: strip tool bookkeeping (via _clean_history_messages)
+    then keep only the last `max_turns` user/assistant exchanges.
 
-
-def _save_user_history(username: str) -> None:
-    """Persist the current session's chat history to disk for this user."""
-    serializable_messages = []
-    for msg in st.session_state.messages:
-        m = dict(msg)
-        if "figures" in m:
-            m["figures"] = [fig.to_json() for fig in m["figures"]]
-        serializable_messages.append(m)
-
-    data = {
-        "messages": serializable_messages,
-        "conversation_messages": st.session_state.conversation_messages,
-        "context_turn_count": st.session_state.context_turn_count,
-    }
-    try:
-        with open(_user_history_path(username), "w") as f:
-            json.dump(data, f)
-    except OSError as e:
-        logger.warning(f"USER_HISTORY_SAVE_FAIL | {username} | {e}")
+    This replaces the old hard reset (which wiped all memory at once when the
+    turn limit was hit): older turns now simply fall out of the window while
+    the complete history stays visible on screen and stored in the database —
+    the same "unbounded scrollback, bounded prompt" behaviour as ChatGPT. Keeps
+    Albert's token usage bounded regardless of how long the conversation grows.
+    """
+    cleaned = _clean_history_messages(
+        [{"role": m["role"], "content": m.get("content", "")} for m in messages]
+    )
+    if max_turns > 0:
+        # Each turn is a user question + its assistant answer → 2 messages.
+        cleaned = cleaned[-(max_turns * 2):]
+    return cleaned
 
 
 # ==================== ALBERT API HELPERS ====================
@@ -1215,14 +1216,67 @@ async def check_mcp_connection() -> bool:
         logger.error(f"MCP_CONNECTION_FAIL | {e}")
         return False
     
-# ==================== MAIN APPLICATION ====================
+# ==================== CONVERSATION SIDEBAR ====================
 
-def main():
-    """Main Streamlit application entry point."""
-    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="wide")
+def _open_conversation(conn, conversation_id: int) -> None:
+    """Switch the active conversation: load its stored messages into the
+    session so the chat area and the context window reflect that thread."""
+    st.session_state.current_conversation_id = conversation_id
+    st.session_state.messages = db.list_messages(conn, conversation_id)
 
-    username, display_name, authenticator = authenticate()
 
+def _render_conversation_sidebar(conn, username: str) -> None:
+    """ChatGPT-style conversation panel: start a new thread, switch between
+    past ones, rename or delete each. The active thread is highlighted."""
+    st.subheader("💬 Conversations")
+
+    if st.button("➕ New conversation", use_container_width=True, key="new_conv_btn"):
+        st.session_state.current_conversation_id = None
+        st.session_state.messages = []
+        st.rerun()
+
+    conversations = db.list_conversations(conn, username)
+    current = st.session_state.get("current_conversation_id")
+
+    if not conversations:
+        st.caption("No conversation yet — ask a question to start one.")
+
+    for c in conversations:
+        is_active = (c["id"] == current)
+        title = c["title"] or "Untitled"
+        row = st.columns([5, 1])
+        if row[0].button(
+            ("🟢 " if is_active else "") + title,
+            key=f"open_conv_{c['id']}",
+            help=title,
+            use_container_width=True,
+            type="primary" if is_active else "secondary",
+        ):
+            _open_conversation(conn, c["id"])
+            st.rerun()
+        with row[1].popover("⋯", use_container_width=True):
+            new_title = st.text_input(
+                "Rename", value=c["title"] or "", key=f"rename_input_{c['id']}"
+            )
+            if st.button("💾 Save", key=f"rename_save_{c['id']}", use_container_width=True):
+                db.rename_conversation(conn, c["id"], new_title.strip() or title)
+                st.rerun()
+            if st.button(
+                "🗑 Delete", key=f"del_conv_{c['id']}",
+                type="primary", use_container_width=True,
+            ):
+                db.delete_conversation(conn, c["id"])
+                if current == c["id"]:
+                    st.session_state.current_conversation_id = None
+                    st.session_state.messages = []
+                logger.info(f"CONVERSATION_DELETED | user={username} | id={c['id']}")
+                st.rerun()
+
+
+# ==================== CHAT PAGE ====================
+
+def chat_page(conn, username: str, display_name: str) -> None:
+    """The main chat interface — one page of the multipage app (see main())."""
     api_key = _get_api_key()
 
     st.title(f"Welcome {display_name}!")
@@ -1255,10 +1309,7 @@ def main():
 
     # ── Sidebar ──────────────────────────────────────────────────────────────
     with st.sidebar:
-        account_col, logout_col = st.columns([2, 1])
-        account_col.caption(f"👤 **{display_name}**")
-        with logout_col:
-            authenticator.logout("Logout", key="logout_btn", use_container_width=True)
+        _render_conversation_sidebar(conn, username)
 
         st.divider()
 
@@ -1290,14 +1341,6 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
 
         with st.spinner("Loading models…"):
             model_names = _list_albert_models(api_key)
-
-        if st.button("🗑️ Clear my history"):
-            logger.info(f"HISTORY_CLEARED | user={username}")
-            st.session_state.messages = []
-            st.session_state.conversation_messages = []
-            st.session_state.context_turn_count = 0
-            _save_user_history(username)
-            st.rerun()
 
         with st.expander("⚙️ Expert mode", expanded=False):
             default_idx = next(
@@ -1341,8 +1384,10 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
             )
             max_context_turns = st.slider(
                 "Max context turns", 1, 20, MAX_CONTEXT_TURNS,
-                help="Number of past questions the model still remembers before the "
-                     "conversation memory resets. Lower this if Albert runs out of tokens."
+                help="How many recent question/answer exchanges are sent to Albert as "
+                     "context — a sliding window: older turns drop off the prompt but "
+                     "stay on screen and in your saved history. Lower this if Albert "
+                     "runs out of tokens."
             )
             preview_rows = st.slider("Preview rows", 5, 200, DEFAULT_PREVIEW_ROWS, 5)
             wikipedia_limit = st.slider(
@@ -1355,13 +1400,12 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
         st.markdown("---")
         st.caption(f"🔗 GitHub: {GITHUB_URL}")
 
-    # ── Initialize chat history — loaded once per session from this user's
-    #    persisted history on disk, so it survives reloads and new logins ──────
-    if "messages" not in st.session_state:
-        history = _load_user_history(username)
-        st.session_state.messages = history["messages"]
-        st.session_state.conversation_messages = history["conversation_messages"]
-        st.session_state.context_turn_count = history["context_turn_count"]
+    # ── Conversation state — a fresh login starts on a new, empty thread; past
+    #    conversations are one click away in the sidebar. Messages are loaded
+    #    from the database when a thread is opened (see _open_conversation). ──
+    if "current_conversation_id" not in st.session_state:
+        st.session_state.current_conversation_id = None
+        st.session_state.messages = []
 
     # ── Display chat history ─────────────────────────────────────────────────
     for msg_idx, msg in enumerate(st.session_state.messages):
@@ -1397,19 +1441,23 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
 
     # ── Query handling (shared by text input and mic input) ─────────────────
     def _handle_query(query: str):
-        if st.session_state.context_turn_count >= max_context_turns:
-            st.session_state.conversation_messages = []
-            st.session_state.context_turn_count = 0
-            reset_notice = (
-                f"🔄 Conversation context reset after {max_context_turns} questions — "
-                f"starting fresh. Earlier exchanges are no longer remembered."
+        # Bound the prompt to the last `max_context_turns` exchanges — built
+        # BEFORE the new question is appended (the agent loop appends it
+        # itself). Older turns fall out of the window but stay on screen and in
+        # the database, so the memory degrades gracefully instead of resetting.
+        history_window = build_context_window(st.session_state.messages, max_context_turns)
+
+        # Create the conversation lazily on its first message, so empty threads
+        # never clutter the sidebar; title it from the opening question.
+        if st.session_state.current_conversation_id is None:
+            title = " ".join(query.strip().split())[:40] or "New conversation"
+            st.session_state.current_conversation_id = db.create_conversation(
+                conn, username, title
             )
-            st.session_state.messages.append({"role": "assistant", "content": reset_notice})
-            with st.chat_message("assistant"):
-                st.markdown(reset_notice)
-            logger.info(f"CONTEXT_RESET | limit={max_context_turns} questions reached")
+        conversation_id = st.session_state.current_conversation_id
 
         st.session_state.messages.append({"role": "user", "content": query})
+        db.add_message(conn, conversation_id, "user", query)
         with st.chat_message("user"):
             st.markdown(query)
 
@@ -1417,7 +1465,7 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
             status_placeholder = st.empty()
             status_container = status_placeholder.status("Processing…", expanded=True)
 
-            answer, figures, wikipedia_urls, pubmed_urls, ncbi_urls, executed_codes, updated_history = asyncio.run(
+            answer, figures, wikipedia_urls, pubmed_urls, ncbi_urls, executed_codes, _updated_history = asyncio.run(
                 albert_agent_loop(
                     model=model,
                     api_key=api_key,
@@ -1435,7 +1483,7 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
                     seed=seed,
                     max_completion_tokens=max_completion_tokens,
                     parallel_tool_calls=parallel_tool_calls,
-                    history_messages=st.session_state.conversation_messages,
+                    history_messages=history_window,
                 )
             )
 
@@ -1458,14 +1506,7 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
                 executed_codes=executed_codes,
             )
 
-        # Only grow the remembered context on a successful turn — a failed
-        # call (timeout, API error) has nothing useful to remember and
-        # shouldn't count against the question limit either.
-        if updated_history is not None:
-            st.session_state.conversation_messages = updated_history
-            st.session_state.context_turn_count += 1
-
-        st.session_state.messages.append({
+        assistant_msg = {
             "role": "assistant",
             "content": answer,
             "figures": figures,
@@ -1473,9 +1514,14 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
             "pubmed_urls": pubmed_urls,
             "ncbi_urls": ncbi_urls,
             "executed_codes": executed_codes,
-        })
+        }
+        st.session_state.messages.append(assistant_msg)
+        db.add_message(conn, conversation_id, "assistant", answer, assistant_msg)
+        db.touch_conversation(conn, conversation_id)
 
-        _save_user_history(username)
+        # Rerun so a just-created conversation (and its title) appears in the
+        # sidebar immediately; the full exchange re-renders from session state.
+        st.rerun()
 
     # ── Chat input (text + mic, native recording button next to send) ───────
     submission = st.chat_input("Ask about viruses...", accept_audio=True)
@@ -1496,6 +1542,169 @@ A chatbot to explore viral metagenomic data from the [Virome@tlas project](http:
         "⚠️ **AI is not magic** — Results may contain errors and "
         "should be verified for scientific or medical use."
     )
+
+
+# ==================== ACCOUNT PAGE (change password) ====================
+
+def account_page(conn, username: str, display_name: str) -> None:
+    """Let the signed-in user change their own password. The current password
+    is verified against the stored bcrypt hash; the new one must satisfy the
+    same rules as registration (_password_problem)."""
+    st.title("👤 My account")
+    st.caption(f"Signed in as **{display_name}** — {username}")
+    st.divider()
+    st.subheader("Change my password")
+
+    # New password lives outside the form so the requirements checklist below
+    # updates live as the user types (same rationale as _register_user).
+    new_password = st.text_input(
+        "New password", type="password", key="account_new_password", help=_PASSWORD_HELP
+    )
+    if new_password:
+        for label, ok in _password_checklist(new_password):
+            st.caption(f"{'✅' if ok else '❌'} {label}")
+    else:
+        st.caption(f"🔒 {_PASSWORD_HELP}")
+
+    with st.form("change_password_form"):
+        current_password = st.text_input("Current password", type="password")
+        confirm_password = st.text_input("Confirm new password", type="password")
+        submitted = st.form_submit_button("Update password", type="primary")
+
+    if not submitted:
+        return
+
+    user = db.get_user(conn, username)
+    if not user or not bcrypt.checkpw(
+        current_password.encode("utf-8"), user["password_hash"].encode("utf-8")
+    ):
+        st.error("Current password is incorrect.")
+        return
+    problem = _password_problem(new_password)
+    if problem:
+        st.error(problem)
+        return
+    if new_password != confirm_password:
+        st.error("The new password and its confirmation do not match.")
+        return
+    if bcrypt.checkpw(new_password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+        st.error("The new password must be different from the current one.")
+        return
+
+    db.update_password(conn, username, stauth.Hasher.hash(new_password))
+    logger.info(f"AUTH | Password changed | email={username}")
+    st.session_state.pop("account_new_password", None)
+    st.success("Password updated. Use it the next time you sign in.")
+
+
+# ==================== ADMIN PAGE (read-only) ====================
+
+def admin_page(conn, role: str) -> None:
+    """Read-only overview for admins: the user list (never passwords) and a
+    browser to inspect any user's conversations. No destructive actions."""
+    st.title("🛠 Admin")
+
+    # Defence in depth: st.navigation already hides this page from non-admins,
+    # but guard the render too in case someone reaches it by URL.
+    if role != "admin":
+        st.error("Administrators only.")
+        st.stop()
+
+    users = db.list_users_with_counts(conn)
+    st.subheader(f"Users ({len(users)})")
+    st.dataframe(
+        [
+            {
+                "Email": u["email"],
+                "First name": u["first_name"],
+                "Last name": u["last_name"],
+                "Role": u["role"],
+                "Created": (u["created_at"] or "")[:19],
+                "Last login": (u["last_login"] or "")[:19],
+                "Conversations": u["n_conversations"],
+            }
+            for u in users
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.divider()
+    st.subheader("Browse a user's conversations")
+
+    emails = [u["email"] for u in users]
+    if not emails:
+        return
+    selected = st.selectbox("User", options=emails, key="admin_user_select")
+
+    conversations = db.list_conversations(conn, selected)
+    if not conversations:
+        st.info("This user has no conversation yet.")
+        return
+
+    labels = {
+        f"{c['title'] or 'Untitled'}  ·  {(c['updated_at'] or '')[:16]}  (#{c['id']})": c["id"]
+        for c in conversations
+    }
+    chosen = st.selectbox("Conversation", options=list(labels.keys()), key="admin_conv_select")
+    conversation_id = labels[chosen]
+
+    st.caption("Read-only view.")
+    for m_idx, m in enumerate(db.list_messages(conn, conversation_id)):
+        with st.chat_message(m["role"]):
+            st.markdown(m.get("content") or "")
+            for f_idx, fig in enumerate(m.get("figures", [])):
+                st.plotly_chart(
+                    fig,
+                    key=f"admin_fig_{conversation_id}_{m_idx}_{f_idx}",
+                    config={"displayModeBar": False},
+                )
+            render_sources(
+                m.get("wikipedia_urls", []),
+                m.get("pubmed_urls", []),
+                m.get("ncbi_urls", []),
+                m.get("executed_codes", []),
+            )
+
+
+# ==================== MAIN APPLICATION (router) ====================
+
+def main():
+    """Entry point: authenticate, then route between the chat, account and
+    (for admins) admin pages via Streamlit's native multipage navigation.
+    Role-gating is done by only listing the admin page for admins."""
+    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="wide")
+
+    conn = db.init_db()
+    username, display_name, role, authenticator = authenticate(conn)
+
+    def _chat():
+        chat_page(conn, username, display_name)
+
+    def _account():
+        account_page(conn, username, display_name)
+
+    def _admin():
+        admin_page(conn, role)
+
+    pages = [
+        st.Page(_chat, title="Chat", icon="💬", url_path="chat", default=True),
+        st.Page(_account, title="My account", icon="👤", url_path="account"),
+    ]
+    if role == "admin":
+        pages.append(st.Page(_admin, title="Admin", icon="🛠", url_path="admin"))
+
+    nav = st.navigation(pages)
+
+    # Signed-in user + logout, rendered on every page (below the page switcher).
+    with st.sidebar:
+        head = st.columns([2, 1])
+        head[0].caption(f"👤 **{display_name}**")
+        with head[1]:
+            authenticator.logout("Logout", key="logout_btn", use_container_width=True)
+        st.divider()
+
+    nav.run()
 
 
 if __name__ == "__main__":
