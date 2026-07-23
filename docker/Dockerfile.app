@@ -24,7 +24,7 @@ RUN addgroup --gid 1000 app \
     && mkdir -p /home/app && chown app:app /home/app
 ENV HOME=/home/app
 
-COPY --chown=app:app app.py config.py prompt.py logging_utils.py ./
+COPY --chown=app:app app.py db.py config.py prompt.py logging_utils.py ./
 COPY docker/entrypoint-app.sh /usr/local/bin/entrypoint-app.sh
 RUN chmod +x /usr/local/bin/entrypoint-app.sh
 
