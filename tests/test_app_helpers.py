@@ -345,3 +345,54 @@ def test_build_context_window_strips_rich_fields_and_figures():
         {"role": "user", "content": "q1"},
         {"role": "assistant", "content": "a1"},
     ]
+
+
+# ==================== _albert_chat retry / rate limiting ====================
+
+class _FakeResp:
+    def __init__(self, status_code, headers=None, body=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self._body = body or {}
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._body
+
+
+def test_albert_chat_returns_json_on_success(monkeypatch):
+    monkeypatch.setattr(app.requests, "post", lambda *a, **k: _FakeResp(200, body={"ok": True}))
+    assert app._albert_chat([], [], "m", "k", 0.2, 0.9)["ok"] is True
+
+
+def test_albert_chat_raises_rate_limit_error_after_retries(monkeypatch):
+    monkeypatch.setattr(app.requests, "post", lambda *a, **k: _FakeResp(429))
+    sleeps = []
+    monkeypatch.setattr(app.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(app.AlbertRateLimitError):
+        app._albert_chat([], [], "m", "k", 0.2, 0.9, retry=3)
+    # sleeps only between attempts, never after the final one
+    assert len(sleeps) == 2
+
+
+def test_albert_chat_honors_retry_after_header(monkeypatch):
+    monkeypatch.setattr(
+        app.requests, "post", lambda *a, **k: _FakeResp(429, headers={"Retry-After": "5"})
+    )
+    waited = []
+    monkeypatch.setattr(app.time, "sleep", lambda s: waited.append(s))
+    with pytest.raises(app.AlbertRateLimitError):
+        app._albert_chat([], [], "m", "k", 0.2, 0.9, retry=2)
+    assert waited == [5]  # honored Retry-After (< cap), one sleep before the last attempt
+
+
+def test_albert_chat_backoff_is_capped(monkeypatch):
+    monkeypatch.setattr(app.requests, "post", lambda *a, **k: _FakeResp(429))
+    waited = []
+    monkeypatch.setattr(app.time, "sleep", lambda s: waited.append(s))
+    with pytest.raises(app.AlbertRateLimitError):
+        app._albert_chat([], [], "m", "k", 0.2, 0.9, retry=8)
+    # exponential 2**attempt, each capped at ALBERT_RETRY_BACKOFF_CAP
+    assert max(waited) <= app.ALBERT_RETRY_BACKOFF_CAP

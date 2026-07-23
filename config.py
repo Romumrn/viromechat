@@ -71,6 +71,12 @@ ALBERT_TIMEOUT       = 120          # seconds — large models can be slow
 ALBERT_MODEL_DEFAULT = "AgentPublic/gptoss120b"  # fallback if model list fails
 ALBERT_WHISPER_MODEL = "openai/whisper-large-v3"  # speech-to-text for the mic input
 
+# The free Albert API is heavily rate-limited (HTTP 429), especially on the
+# large models — retry a few times, honoring the server's Retry-After header
+# when present and otherwise backing off exponentially up to this cap (seconds).
+ALBERT_MAX_RETRIES       = 5
+ALBERT_RETRY_BACKOFF_CAP = 30
+
 # ==================== APP ==================== #
 PAGE_TITLE   = "Virus Dataset AI Agent 🦠"
 PAGE_ICON    = "🦠"

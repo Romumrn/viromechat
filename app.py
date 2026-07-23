@@ -33,6 +33,7 @@ import db
 from prompt import build_system_prompt
 from config import (
     ALBERT_BASE_URL, ALBERT_TIMEOUT, ALBERT_MODEL_DEFAULT, ALBERT_WHISPER_MODEL,
+    ALBERT_MAX_RETRIES, ALBERT_RETRY_BACKOFF_CAP,
     LOG_DIR, MCP_SERVER_URL, APP_ENV_PATH,
     _admin_emails,
     PAGE_TITLE, PAGE_ICON, GITHUB_URL,
@@ -617,6 +618,13 @@ def _parse_tool_arguments(raw_args) -> dict:
     return {}
 
 
+class AlbertRateLimitError(RuntimeError):
+    """Raised when Albert keeps returning HTTP 429 after all retries are
+    exhausted — the (free) API is rate-limiting/saturating requests. Kept
+    distinct from a genuine connectivity or server error so the agent loop can
+    show a clearer, actionable message."""
+
+
 def _albert_chat(
     messages: list,
     tools: list,
@@ -629,12 +637,16 @@ def _albert_chat(
     seed=42,
     max_completion_tokens=4096,
     parallel_tool_calls=False,
-    retry: int = 3,
+    retry: int = ALBERT_MAX_RETRIES,
 ) -> dict:
     """
-    Send chat completion request to Albert API with retry logic.
+    Send a chat completion request to Albert API with retry logic.
 
-    Retries up to `retry` times on HTTP 429 (rate limiting) with exponential backoff.
+    Retries up to `retry` times on HTTP 429 (rate limiting). Honors the
+    server's Retry-After header when present, otherwise backs off exponentially
+    (2**attempt seconds, capped at ALBERT_RETRY_BACKOFF_CAP). Raises
+    AlbertRateLimitError if every attempt is rate-limited — note this cannot
+    lift a hard quota, it only rides out transient throttling.
     """
     payload = {
         "model": model,
@@ -661,9 +673,17 @@ def _albert_chat(
             )
 
             if r.status_code == 429:
-                wait = 2 ** attempt
+                # Prefer the server's own Retry-After (seconds) when it sends
+                # one; otherwise exponential backoff, both capped so we never
+                # sleep absurdly long.
+                retry_after = (r.headers.get("Retry-After") or "").strip()
+                if retry_after.isdigit():
+                    wait = min(int(retry_after), ALBERT_RETRY_BACKOFF_CAP)
+                else:
+                    wait = min(2 ** attempt, ALBERT_RETRY_BACKOFF_CAP)
                 logger.warning(f"RATE_LIMIT | attempt {attempt}/{retry} — waiting {wait}s")
-                time.sleep(wait)
+                if attempt < retry:  # no point sleeping after the last attempt
+                    time.sleep(wait)
                 continue
 
             r.raise_for_status()
@@ -677,7 +697,9 @@ def _albert_chat(
             logger.error(f"ALBERT_HTTP_ERROR | {e}")
             raise
 
-    raise RuntimeError("Albert API: max retries exceeded")
+    raise AlbertRateLimitError(
+        f"Albert rate-limited the request after {retry} attempts (HTTP 429)."
+    )
 
 
 # ==================== ERROR REPORTING ====================
@@ -935,6 +957,14 @@ async def albert_agent_loop(
                 logger.error("ALBERT_TIMEOUT")
                 return (
                     "The model took too long to respond (>180 s). Please try again.",
+                    generated_figures, [], [], [], executed_codes, None,
+                )
+            except AlbertRateLimitError:
+                logger.error("ALBERT_RATE_LIMITED")
+                return (
+                    "⏳ Albert is rate-limiting requests right now — the free API is "
+                    "saturated, especially on the large models. Please wait a moment "
+                    "and try again, or pick a lighter model in ⚙️ Expert mode.",
                     generated_figures, [], [], [], executed_codes, None,
                 )
             except Exception as e:
