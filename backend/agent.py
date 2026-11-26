@@ -95,6 +95,8 @@ async def run_agent(
     real_pmids: set = set()
     # How many tool calls have been made so far this turn, to enforce max_tool_calls
     tool_call_count = 0
+    # Whether we've already nudged the model after an empty premature stop (once per turn)
+    continuation_nudged = False
 
     def _done_event(history):
         # Figures serialized to plotly JSON dicts for the caller / SSE.
@@ -195,22 +197,28 @@ async def run_agent(
             if finish != "tool_calls" or not msg.get("tool_calls"):
                 final_text = (msg.get("content") or "").strip()
 
-                # Guard against the model stopping too early: if it's produced no text
-                # and has barely used any tools, nudge it to keep researching instead
-                # of accepting an empty/premature answer.
-                if not final_text and tool_call_count > 0 and tool_call_count < min(3, max_tool_calls):
+                # Guard against the model stopping too early: gpt-oss often stops with
+                # empty content mid-investigation (e.g. right after a lookup confirmed a
+                # virus name exists, before querying its rows). While tool budget remains,
+                # nudge it once to keep going instead of falling back to the synthesis
+                # below, which only sees partial results and may wrongly conclude
+                # "no data". Once per turn, so an always-empty model can't loop forever.
+                if (not final_text and tool_call_count > 0
+                        and tool_call_count < max_tool_calls and not continuation_nudged):
+                    continuation_nudged = True
                     logger.warning(
-                        f"EARLY_STOP | finish=stop, content empty, only {tool_call_count} tool calls — "
+                        f"EARLY_STOP | finish=stop, content empty after {tool_call_count} tool calls — "
                         f"injecting continuation prompt"
                     )
                     messages.append(msg)
                     messages.append({
                         "role": "user",
                         "content": (
-                            f"You have only searched {tool_call_count} time(s) so far and haven't "
-                            f"found enough information yet. Please continue your research: "
-                            f"search Wikipedia and PubMed for viruses infecting the requested host, "
-                            f"then provide a complete scientific answer."
+                            "Your reply was empty and the original question is not answered yet. "
+                            "Continue working on it: call the tools you still need — in particular, "
+                            "if a lookup query just confirmed that a name exists in the dataset, now "
+                            "run the real query filtering on that exact value (and create the map or "
+                            "chart if one was asked for) — then write the complete final answer."
                         ),
                     })
                     # Skip straight to the next loop iteration (another LLM call)
@@ -249,8 +257,11 @@ async def run_agent(
                         # Every tool call failed — tell the model to fall back on its own knowledge
                         logger.warning("SYNTHESIS_FALLBACK | all tool results are errors")
                         context_note = (
-                            "Note: the dataset did not contain data for this query "
-                            "(search returned no results). Answer from scientific knowledge only."
+                            "Note: every query to the virome@tlas database failed or returned no "
+                            "results for this question. State that explicitly at the start of the "
+                            "answer (the database query did not return data — not that the data "
+                            "does not exist), then answer from general scientific knowledge, "
+                            "clearly labeled as such."
                         )
                     else:
                         context_note = f"Here is all the information gathered:\n\n{context_block}"
@@ -267,15 +278,23 @@ async def run_agent(
                                 f"{context_note}\n\n"
                                 f"Write a detailed, well-structured scientific answer. "
                                 f"Requirements:\n"
+                                f"- Start with what the virome@tlas database results above show "
+                                f"(counts, hosts, countries, dates), attributed to the virome@tlas "
+                                f"database; only then add external context (Wikipedia, PubMed) in a "
+                                f"separate section\n"
                                 f"- Cover each relevant virus with its taxonomy (family, genus, species), "
                                 f"transmission route, pathogenesis, and key clinical signs\n"
                                 f"- Use proper scientific nomenclature\n"
                                 f"- Structure your answer with one section per virus\n"
                                 f"- Be thorough and complete — do not summarize\n"
-                                f"- Do not mention tools, datasets, or data retrieval\n"
+                                f"- Do not mention tool names, raw column names or data retrieval steps\n"
                                 f"- CRITICAL: do NOT invent or mention any PMID. "
                                 f"Only reference PMIDs that appear verbatim in the context above. "
-                                f"If no PMIDs are in the context, write none."
+                                f"If no PMIDs are in the context, write none.\n"
+                                f"- CRITICAL: never claim the data contains no records for something "
+                                f"if any result above shows it exists (e.g. a lookup returning its "
+                                f"name). If the results are incomplete, say the retrieval did not "
+                                f"finish and suggest asking again — do not present that as absence of data."
                             ),
                         },
                     ]

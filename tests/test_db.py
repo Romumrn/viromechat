@@ -132,6 +132,56 @@ def test_message_roundtrip_rehydrates_plotly_figures(conn):
     assert list(figs[0].data[0].y) == [1, 2]
 
 
+# A map as Plotly 6 serialized it (px.scatter_mapbox) — trimmed real output.
+_LEGACY_MAPBOX_FIG = {
+    "data": [{
+        "type": "scattermapbox", "subplot": "mapbox", "mode": "markers",
+        "lat": [11.8], "lon": [99.8], "customdata": [["SAMN1"]],
+        "hovertemplate": "sample_id=%{customdata[0]}<extra></extra>",
+    }],
+    "layout": {
+        "mapbox": {"center": {"lat": 11.8, "lon": 99.8}, "zoom": 1, "style": "open-street-map"},
+        "template": {
+            "data": {"scattermapbox": [{"type": "scattermapbox", "marker": {"colorbar": {"ticks": ""}}}]},
+            "layout": {"mapbox": {"style": "light"}},
+        },
+        "title": {"text": "LSDV"},
+    },
+}
+
+
+def _store_raw_figure(conn, fig_dict):
+    """Insert a message whose payload holds a figure exactly as an older
+    Plotly version wrote it (bypassing add_message, which needs a Figure)."""
+    db.create_user(conn, "a@lab.fr", "A", "B", "H", "user")
+    cid = db.create_conversation(conn, "a@lab.fr", "c")
+    conn.execute(
+        "INSERT INTO messages(conversation_id, role, content, payload_json, created_at) "
+        "VALUES(?, 'assistant', 'map', ?, 'now')",
+        (cid, json.dumps({"figures": [json.dumps(fig_dict)]})),
+    )
+    conn.commit()
+    return cid
+
+
+def test_legacy_mapbox_figure_is_upgraded_on_rehydrate(conn):
+    cid = _store_raw_figure(conn, _LEGACY_MAPBOX_FIG)
+    fig = db.list_messages(conn, cid)[0]["figures"][0]
+    assert isinstance(fig, go.Figure)
+    assert fig.data[0].type == "scattermap"
+    assert fig.layout.map.style == "open-street-map"
+    assert list(fig.data[0].customdata[0]) == ["SAMN1"]
+
+
+def test_legacy_mapbox_figure_is_upgraded_in_json_api(conn):
+    cid = _store_raw_figure(conn, _LEGACY_MAPBOX_FIG)
+    fig = db.list_messages_json(conn, cid)[0]["figures"][0]
+    assert fig["data"][0]["type"] == "scattermap"
+    assert fig["data"][0]["subplot"] == "map"
+    assert "mapbox" not in fig["layout"] and fig["layout"]["map"]["zoom"] == 1
+    assert "scattermapbox" not in fig["layout"]["template"]["data"]
+
+
 # ==================== error reports ====================
 
 def test_error_report_lifecycle(conn):

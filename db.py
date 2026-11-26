@@ -338,10 +338,55 @@ def _serialize_payload(msg: dict) -> str:
     return json.dumps(payload)
 
 
+# Plotly 7 removed the Mapbox-based traces. Maps saved before the upgrade
+# (Plotly 6, scatter_mapbox) are stored with the old names and would make
+# pio.from_json raise, so they're renamed to their MapLibre equivalents on load.
+_LEGACY_MAP_TRACES = {
+    "scattermapbox": "scattermap",
+    "densitymapbox": "densitymap",
+    "choroplethmapbox": "choroplethmap",
+}
+
+
+def _upgrade_legacy_map_layout(layout: dict) -> None:
+    for key in [k for k in layout if k.startswith("mapbox")]:
+        sub = layout.pop(key)
+        if isinstance(sub, dict):
+            sub.pop("accesstoken", None)
+            if str(sub.get("style", "")).startswith("stamen"):
+                sub["style"] = "open-street-map"  # Stamen tiles don't exist in MapLibre
+        layout["map" + key[len("mapbox"):]] = sub
+
+
+def _upgrade_legacy_map_figure(fig: dict) -> dict:
+    """Rename Plotly <7 Mapbox traces/layout keys to Plotly 7 MapLibre ones (in place)."""
+    for trace in fig.get("data") or []:
+        if trace.get("type") in _LEGACY_MAP_TRACES:
+            trace["type"] = _LEGACY_MAP_TRACES[trace["type"]]
+            if str(trace.get("subplot", "")).startswith("mapbox"):
+                trace["subplot"] = "map" + trace["subplot"][len("mapbox"):]
+    layout = fig.get("layout") or {}
+    _upgrade_legacy_map_layout(layout)
+    template = layout.get("template") or {}
+    tdata = template.get("data") or {}
+    for old, new in _LEGACY_MAP_TRACES.items():
+        if old in tdata:
+            legacy = tdata.pop(old)
+            tdata.setdefault(new, legacy)
+    _upgrade_legacy_map_layout(template.get("layout") or {})
+    return fig
+
+
+def _load_figure_dict(fig_json: str) -> dict:
+    return _upgrade_legacy_map_figure(json.loads(fig_json))
+
+
 def _rehydrate_payload(payload_json: str | None) -> dict:
     data = json.loads(payload_json) if payload_json else {}
     if "figures" in data:
-        data["figures"] = [pio.from_json(fj) for fj in data["figures"]]
+        data["figures"] = [
+            pio.from_json(json.dumps(_load_figure_dict(fj))) for fj in data["figures"]
+        ]
     return data
 
 
@@ -393,7 +438,7 @@ def list_messages_json(conn: sqlite3.Connection, conversation_id: int) -> list[d
         data = json.loads(r["payload_json"]) if r["payload_json"] else {}
         if "figures" in data:
             # Stored as Plotly JSON strings; hand back parsed dicts for React.
-            data["figures"] = [json.loads(fj) for fj in data["figures"]]
+            data["figures"] = [_load_figure_dict(fj) for fj in data["figures"]]
         m.update(data)
         out.append(m)
     return out

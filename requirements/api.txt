@@ -3,7 +3,7 @@
 # talks to it over HTTP via fastmcp.Client, so it keeps fastmcp but no longer
 # needs the MCP server's data stack (duckdb/pandas/numpy).
 fastmcp>=3.4
-plotly>=6.0
+plotly>=7.2,<8
 requests>=2.32
 fastapi>=0.115
 uvicorn[standard]>=0.30
